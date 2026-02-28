@@ -194,8 +194,3 @@ src/api/                    — API service (Python/FastAPI)
   Dockerfile
 ```
 
-## Next Steps
-
-1. Add Mistral integration in `src/api/services/mistral.py` — send transcribed text, get a response
-2. Add ElevenLabs TTS in `src/api/services/elevenlabs/tts.py` — convert Mistral's response to audio
-3. Wire both into `src/api/services/pipeline.py` to complete the chain: voice → text → Mistral → audio → WhatsApp

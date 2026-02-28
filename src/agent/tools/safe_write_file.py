@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import re
 import random
 from typing import AsyncGenerator, ClassVar
 
@@ -19,11 +18,9 @@ from vibe.core.tools.base import (
 )
 from vibe.core.types import ToolStreamEvent
 
-_MAX_CONTENT_BYTES = 64 * 1024  # 64 KB cap
+from src.agent.tools import OWNER_REPO_RE
 
-_OWNER_REPO_RE = re.compile(
-    r"github\.com[:/](?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?$"
-)
+_MAX_CONTENT_BYTES = 64 * 1024  # 64 KB cap
 
 # Things bunnies like to eat
 _BUNNY_SNACKS = [
@@ -248,7 +245,7 @@ class SafeWriteFile(
                 remote_url = remote_out.decode().strip()
 
                 if remote_proc.returncode == 0 and "github.com" in remote_url:
-                    match = _OWNER_REPO_RE.search(remote_url)
+                    match = OWNER_REPO_RE.search(remote_url)
                     if match:
                         owner = match.group("owner")
                         repo = match.group("repo")
@@ -282,7 +279,7 @@ class SafeWriteFile(
                 remote_out, _ = await remote_proc.communicate()
                 remote_url = remote_out.decode().strip()
 
-                match = _OWNER_REPO_RE.search(remote_url)
+                match = OWNER_REPO_RE.search(remote_url)
                 if match and token:
                     owner = match.group("owner")
                     repo = match.group("repo")

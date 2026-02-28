@@ -7,8 +7,8 @@
 - Review repo for MR
 
 ### Must
+- Elevenlabs -> api -> vibe (do we always do this?)
 - Deploy to Digital Ocean
-- User should be able to see the mistral vibe cli
 - Make demo
 
 ### Maybe
@@ -18,4 +18,5 @@
 ### Done
 - Whatsapp number should not be sent via llm, as it can get it wrong
 - Remove pr-agent (including from notice if not implemented / tested)
+- User should be able to see the mistral vibe cli
 - Update ATTRIBUTION NOTICE

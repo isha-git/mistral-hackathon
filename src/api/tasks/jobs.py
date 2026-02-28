@@ -15,8 +15,22 @@ from src.api.config.settings import get_settings
 from src.api.models.job import JobStatus, TurnResult
 from src.api.services.job_service import get_job_service
 from src.agent.vibe_wrapper import run_vibe_task as run_vibe
+from src.agent.vibe_wrapper import run_vibe_task_streaming
 
 logger = logging.getLogger(__name__)
+
+
+def _make_progress_callback(job):
+    """Create a progress callback that publishes structured events to Redis."""
+    job_service = get_job_service()
+
+    def _on_progress(data: dict):
+        try:
+            job_service.publish_progress(str(job.id), data)
+        except Exception:
+            logger.debug("Redis progress publish failed", exc_info=True)
+
+    return _on_progress
 
 
 @celery_app.task(bind=True, max_retries=3)
@@ -57,10 +71,12 @@ def run_vibe_task(self, job_id: str):
         logger.info(
             f"[Job {job_id}] Running vibe task (will load session from {worktree_path})"
         )
-        result = run_vibe(
+        progress_cb = _make_progress_callback(job)
+        result = run_vibe_task_streaming(
             prompt=job.prompt,
             working_dir=worktree_path,
             max_turns=job.max_turns,
+            on_progress=progress_cb,
         )
 
         logger.info(f"[Job {job_id}] Vibe completed with success: {result.success}")
@@ -106,6 +122,7 @@ def run_vibe_task(self, job_id: str):
             job_service.update_job_status(
                 job_id, JobStatus.COMPLETED, result=result.output
             )
+            job_service.publish_progress(job_id, {"event": "completed", "content": result.output})
             _notify_webhook(
                 job,
                 {
@@ -122,6 +139,7 @@ def run_vibe_task(self, job_id: str):
             job_service.update_job_status(
                 job_id, JobStatus.FAILED, error_message=result.error or "Task failed"
             )
+            job_service.publish_progress(job_id, {"event": "failed", "content": result.error or "Task failed"})
             _notify_webhook(
                 job,
                 {
@@ -139,6 +157,7 @@ def run_vibe_task(self, job_id: str):
             JobStatus.TIMEOUT,
             error_message="Task exceeded maximum execution time",
         )
+        job_service.publish_progress(job_id, {"event": "failed", "content": "Task exceeded maximum execution time"})
         _notify_webhook(job, {"status": "timeout", "job_id": str(job_id)})
         raise
 
@@ -154,6 +173,7 @@ def run_vibe_task(self, job_id: str):
 
         logger.error(f"[Job {job_id}] All retries exhausted, marking as FAILED")
         job_service.update_job_status(job_id, JobStatus.FAILED, error_message=str(e))
+        job_service.publish_progress(job_id, {"event": "failed", "content": str(e)})
         _notify_webhook(
             job, {"status": "failed", "error": str(e), "job_id": str(job_id)}
         )
@@ -184,8 +204,17 @@ def _extract_question(output: str) -> str | None:
     return None
 
 
+def _sanitize_for_summary(text: str) -> str:
+    """Strip common token patterns before sending to summarization API."""
+    text = re.sub(r'ghp_[A-Za-z0-9]{36,}', '[REDACTED]', text)
+    text = re.sub(r'github_pat_[A-Za-z0-9_]{20,}', '[REDACTED]', text)
+    text = re.sub(r'x-access-token:[^\s@]+', 'x-access-token:[REDACTED]', text)
+    return text
+
+
 def _summarise_for_whatsapp(text: str) -> str:
     """Summarise long agent output for WhatsApp using Mistral."""
+    text = _sanitize_for_summary(text)
     if len(text) <= 1500:
         return text
 
@@ -291,11 +320,13 @@ def continue_vibe_task(self, job_id: str, user_response: str):
             f"Previous context: {job.prompt}\n\nUser response: {user_response}"
         )
 
-        # Run vibe
-        result = run_vibe(
+        # Run vibe with streaming progress
+        progress_cb = _make_progress_callback(job)
+        result = run_vibe_task_streaming(
             prompt=combined_prompt,
             working_dir=job.working_dir,
             max_turns=job.max_turns,
+            on_progress=progress_cb,
         )
 
         # Store result
@@ -327,6 +358,7 @@ def continue_vibe_task(self, job_id: str, user_response: str):
             job_service.update_job_status(
                 job_id, JobStatus.COMPLETED, result=result.output
             )
+            job_service.publish_progress(job_id, {"event": "completed", "content": result.output})
             _notify_webhook(
                 job,
                 {
@@ -340,6 +372,7 @@ def continue_vibe_task(self, job_id: str, user_response: str):
             job_service.update_job_status(
                 job_id, JobStatus.FAILED, error_message=result.error or "Task failed"
             )
+            job_service.publish_progress(job_id, {"event": "failed", "content": result.error or "Task failed"})
             _notify_webhook(
                 job,
                 {
@@ -357,6 +390,7 @@ def continue_vibe_task(self, job_id: str, user_response: str):
             JobStatus.TIMEOUT,
             error_message="Task exceeded maximum execution time",
         )
+        job_service.publish_progress(job_id, {"event": "failed", "content": "Task exceeded maximum execution time"})
         _notify_webhook(job, {"status": "timeout", "job_id": str(job_id)})
         raise
 
@@ -372,6 +406,7 @@ def continue_vibe_task(self, job_id: str, user_response: str):
 
         logger.error(f"[Job {job_id}] All retries exhausted")
         job_service.update_job_status(job_id, JobStatus.FAILED, error_message=str(e))
+        job_service.publish_progress(job_id, {"event": "failed", "content": str(e)})
         _notify_webhook(
             job, {"status": "failed", "error": str(e), "job_id": str(job_id)}
         )

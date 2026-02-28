@@ -13,6 +13,8 @@ from src.api.services.elevenlabs.stt import transcribe
 from src.api.config.settings import get_settings
 from src.api.tasks.jobs import run_vibe_task
 
+_MAX_AUDIO_B64 = 10 * 1024 * 1024  # ~7.5 MB decoded
+
 
 async def process_message(msg: IncomingMessage) -> Reply:
     """
@@ -24,6 +26,8 @@ async def process_message(msg: IncomingMessage) -> Reply:
     - Send "/new_project" to start fresh
     """
     if msg.type == "audio" and msg.media_base64:
+        if len(msg.media_base64) > _MAX_AUDIO_B64:
+            return Reply(type="text", text="Audio is too large. Please send a shorter message.")
         try:
             transcribed = await transcribe(msg.media_base64)
             prompt = transcribed.strip()
@@ -100,6 +104,8 @@ async def _add_to_project(prompt: str, sender: str) -> Reply:
         existing_job.status = JobStatus.PENDING
         job_service.add_conversation_message(existing_job.id, "user", prompt)
         job_service.save_job(existing_job)
+        # Clear stale progress events from previous run
+        job_service.clear_progress_events(str(existing_job.id))
         job = existing_job
         print(f"[pipeline] Reusing project for {sender}: {job.id}")
 
@@ -108,7 +114,6 @@ async def _add_to_project(prompt: str, sender: str) -> Reply:
     return Reply(
         type="text",
         text=f"Got it! Working on: {prompt[:50]}{'...' if len(prompt) > 50 else ''}\n\n"
-        f"Job ID: `{job.id}`\n"
-        f"Working dir: `{job.working_dir}`\n"
+        f"Track progress: {settings.base_url}/jobs/{job.id}\n\n"
         "I'll message you when done or if I need anything.",
     )

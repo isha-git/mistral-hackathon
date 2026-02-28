@@ -6,7 +6,7 @@ import time
 from collections import defaultdict
 
 from src.api.config.settings import get_settings
-from src.api.routes import tasks, health, webhook
+from src.api.routes import tasks, health, webhook, jobs
 
 # Configure logging
 logging.basicConfig(
@@ -84,6 +84,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
 app.include_router(tasks.router)
 app.include_router(health.router)
 app.include_router(webhook.router)
+app.include_router(jobs.router)
 
 
 @app.get("/")

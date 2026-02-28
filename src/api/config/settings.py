@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     # GitHub token for git operations (clone private repos, create PRs)
     github_token: str | None = None
 
+    # Public base URL for progress page links (set to your Digital Ocean domain in prod)
+    base_url: str = "http://localhost:8000"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

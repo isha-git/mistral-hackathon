@@ -5,6 +5,7 @@ Loads session history from vibe's session directories.
 Restricts the agent to read-only code access + custom git tools.
 """
 
+import asyncio
 import os
 import json
 import re
@@ -12,7 +13,7 @@ import tempfile
 import logging
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Callable
 
 # Import vibe direct API (no TUI)
 from vibe.core.paths.config_paths import unlock_config_paths
@@ -21,6 +22,20 @@ unlock_config_paths()
 from vibe.core.programmatic import run_programmatic
 from vibe.core.config import VibeConfig
 from vibe.core.types import OutputFormat, LLMMessage, Role
+
+# Streaming-specific imports
+from vibe import __version__ as _vibe_version
+from vibe.core.agent_loop import AgentLoop
+from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.output_formatters import create_formatter
+from vibe.core.types import (
+    AssistantEvent,
+    EntrypointMetadata,
+    ClientMetadata,
+    ToolCallEvent,
+    ToolResultEvent,
+)
+from vibe.core.utils import ConversationLimitException
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +77,49 @@ class VibeResult:
     output: str
     files_changed: list[str] = field(default_factory=list)
     error: Optional[str] = None
+
+
+def _has_origin_remote(repo_path: str) -> bool:
+    """Check if a git repo has an 'origin' remote configured."""
+    try:
+        git_config = os.path.join(repo_path, ".git", "config")
+        if not os.path.isfile(git_config):
+            return False
+        with open(git_config) as f:
+            return '[remote "origin"]' in f.read()
+    except OSError:
+        return False
+
+
+def _enter_cloned_repo(working_dir: str) -> None:
+    """
+    If working_dir itself is not a git repo with an origin remote,
+    look for a subdirectory that is (i.e. a previously cloned repo)
+    and cd into it.  This handles continuation sessions where git_clone
+    ran in a prior session and changed CWD, but the new session starts
+    in the parent directory.
+    """
+    # Already inside a repo with origin? Nothing to do.
+    if _has_origin_remote(working_dir):
+        return
+
+    # Scan immediate subdirectories for a cloned git repo with origin
+    candidates = []
+    try:
+        for entry in os.scandir(working_dir):
+            if entry.is_dir() and _has_origin_remote(entry.path):
+                candidates.append(entry.path)
+    except OSError:
+        return
+
+    if len(candidates) == 1:
+        os.chdir(candidates[0])
+        logger.info(f"Auto-entered cloned repo at {candidates[0]}")
+    elif len(candidates) > 1:
+        # Multiple repos — pick the most recently modified one
+        candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        os.chdir(candidates[0])
+        logger.info(f"Auto-entered most recent cloned repo at {candidates[0]}")
 
 
 def _load_session_messages(working_dir: str) -> list[LLMMessage]:
@@ -202,6 +260,7 @@ def run_vibe_task(
     # Save and change directory
     original_dir = os.getcwd()
     os.chdir(working_dir)
+    _enter_cloned_repo(working_dir)
 
     try:
         # Setup vibe config directory if not exists
@@ -280,6 +339,178 @@ enabled = false
 
     except Exception as e:
         logger.error(f"Vibe error: {e}")
+        return VibeResult(
+            success=False,
+            output="",
+            error=str(e),
+        )
+    finally:
+        os.chdir(original_dir)
+
+
+# ---------------------------------------------------------------------------
+# Structured event formatting for progress page
+# ---------------------------------------------------------------------------
+
+
+def _make_tool_call_event(event: ToolCallEvent) -> dict:
+    """Build a structured dict for a tool call event."""
+    args_dict = event.args.model_dump() if event.args else {}
+    return {
+        "event": "tool_call",
+        "tool": event.tool_name,
+        "args": args_dict,
+    }
+
+
+def _make_tool_result_event(event: ToolResultEvent) -> dict:
+    """Build a structured dict for a tool result event."""
+    return {
+        "event": "tool_result",
+        "tool": event.tool_name,
+        "result": str(event.result) if event.result else None,
+        "error": event.error,
+        "duration": event.duration,
+    }
+
+
+def run_vibe_task_streaming(
+    prompt: str,
+    working_dir: str | None = None,
+    max_turns: int = 10,
+    previous_messages: list | None = None,
+    on_progress: Callable[[dict], None] | None = None,
+) -> VibeResult:
+    """
+    Run a vibe task with real-time progress callbacks.
+
+    Mirrors run_vibe_task() but iterates over AgentLoop events directly,
+    firing ``on_progress(event_dict)`` on tool calls, tool results, and
+    assistant messages so the caller can relay them to a progress page.
+
+    ``on_progress`` is called synchronously but should be non-blocking.
+    """
+    _inject_github_token()
+    logger.info(f"GITHUB_TOKEN present: {bool(os.environ.get('GITHUB_TOKEN'))}")
+
+    if working_dir is None:
+        working_dir = tempfile.mkdtemp(prefix="vibe_work_")
+
+    parent = Path(working_dir).parent
+    parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(working_dir, exist_ok=True)
+
+    logger.info(f"Running vibe streaming task in {working_dir}")
+    logger.info(f"Prompt: {prompt[:100]}...")
+
+    # Load previous messages (same logic as run_vibe_task)
+    session_messages = _load_session_messages(working_dir)
+    if previous_messages:
+        final_messages: list[LLMMessage] = []
+        for msg in previous_messages:
+            if isinstance(msg, dict):
+                role_str = msg.get("role", "user")
+                content = msg.get("content", "")
+                role = Role.assistant if role_str == "assistant" else Role.user
+                final_messages.append(LLMMessage(role=role, content=content))
+            elif isinstance(msg, LLMMessage):
+                final_messages.append(msg)
+    else:
+        final_messages = session_messages
+
+    if final_messages:
+        logger.info(f"Continuing with {len(final_messages)} previous messages")
+
+    original_dir = os.getcwd()
+    os.chdir(working_dir)
+    _enter_cloned_repo(working_dir)
+
+    try:
+        # Setup vibe config (same as run_vibe_task)
+        vibe_home = Path(os.environ.get("VIBE_HOME", Path.home() / ".vibe"))
+        vibe_home.mkdir(parents=True, exist_ok=True)
+        config_file = vibe_home / "config.toml"
+        if not config_file.exists():
+            config_file.write_text(
+                "[session_logging]\nenabled = true\nsave_dir = \"sessions\"\n\n"
+                "[telemetry]\nenabled = false\n"
+            )
+
+        config = VibeConfig.load()
+        config.tool_paths = [_TOOLS_DIR]
+        config.enabled_tools = list(_ENABLED_TOOLS)
+
+        formatter = create_formatter(OutputFormat.TEXT)
+
+        agent_loop = AgentLoop(
+            config,
+            agent_name=BuiltinAgentName.AUTO_APPROVE,
+            message_observer=formatter.on_message_added,
+            max_turns=max_turns,
+            max_price=None,
+            enable_streaming=False,
+            entrypoint_metadata=EntrypointMetadata(
+                agent_entrypoint="programmatic",
+                agent_version=_vibe_version,
+                client_name="vibe_programmatic_streaming",
+                client_version=_vibe_version,
+            ),
+        )
+
+        async def _async_run() -> str | None:
+            try:
+                if final_messages:
+                    non_system = [
+                        m for m in final_messages if not (m.role == Role.system)
+                    ]
+                    agent_loop.messages.extend(non_system)
+                    logger.info(f"Loaded {len(non_system)} messages from session")
+
+                agent_loop.emit_new_session_telemetry()
+
+                async for event in agent_loop.act(_AGENT_INSTRUCTIONS + prompt):
+                    # --- progress callbacks ---
+                    if on_progress:
+                        try:
+                            if isinstance(event, ToolCallEvent):
+                                on_progress(_make_tool_call_event(event))
+                            elif isinstance(event, ToolResultEvent):
+                                on_progress(_make_tool_result_event(event))
+                            elif isinstance(event, AssistantEvent):
+                                on_progress({
+                                    "event": "assistant",
+                                    "content": event.content,
+                                })
+                        except Exception:
+                            logger.debug("on_progress callback error", exc_info=True)
+
+                    # --- standard formatter handling ---
+                    formatter.on_event(event)
+                    if isinstance(event, AssistantEvent) and event.stopped_by_middleware:
+                        raise ConversationLimitException(event.content)
+
+                return formatter.finalize()
+            finally:
+                await agent_loop.telemetry_client.aclose()
+
+        output = asyncio.run(_async_run())
+        result = output or "Task completed with no output"
+
+        logger.info("Vibe streaming completed successfully")
+        logger.info(f"Output: {result[:200]}...")
+
+        files_changed = []
+        if "File created:" in result:
+            files_changed = re.findall(r"File created:\s*`?([^`\n]+)", result)
+
+        return VibeResult(
+            success=True,
+            output=result,
+            files_changed=files_changed,
+        )
+
+    except Exception as e:
+        logger.error(f"Vibe streaming error: {e}")
         return VibeResult(
             success=False,
             output="",

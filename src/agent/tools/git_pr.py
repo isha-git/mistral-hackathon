@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import re
 from typing import AsyncGenerator, ClassVar
 
 import httpx
@@ -17,9 +16,7 @@ from vibe.core.tools.base import (
 )
 from vibe.core.types import ToolStreamEvent
 
-_OWNER_REPO_RE = re.compile(
-    r"github\.com[:/](?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?$"
-)
+from src.agent.tools import OWNER_REPO_RE
 
 
 class GitPrArgs(BaseModel):
@@ -82,7 +79,7 @@ class GitPr(BaseTool[GitPrArgs, GitPrResult, GitPrConfig, BaseToolState]):
             yield GitPrResult(output="No 'origin' remote found", success=False)
             return
 
-        match = _OWNER_REPO_RE.search(remote_url)
+        match = OWNER_REPO_RE.search(remote_url)
         if not match:
             yield GitPrResult(
                 output=f"Could not parse owner/repo from remote URL: {remote_url}",

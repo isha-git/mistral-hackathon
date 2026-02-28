@@ -190,7 +190,7 @@ def _extract_question(output: str) -> str | None:
 
     # Check for question patterns
     question_patterns = [
-        r"(?:what|which|how|where|when|why|who|can you|could you).+\?",
+        r"(?:what|which|how|where|when|why|who|should|would|do you|are there|is there|can you|could you).+\?",
         r"please clarify",
         r"need more information",
         r"missing details",

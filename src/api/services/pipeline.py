@@ -5,15 +5,51 @@ Simple model: One active job per user (sender), all messages go to same working 
 Send "/new_project" to start fresh.
 """
 
+import os
 from typing import Optional
+
+import httpx
 
 from src.api.models.job import IncomingMessage, Reply, JobStatus
 from src.api.services.job_service import get_job_service
 from src.api.services.elevenlabs.stt import transcribe
 from src.api.config.settings import get_settings
-from src.api.tasks.jobs import run_vibe_task
+from src.api.tasks.jobs import run_vibe_task, continue_vibe_task
 
 _MAX_AUDIO_B64 = 10 * 1024 * 1024  # ~7.5 MB decoded
+
+
+def _summarise_prompt(text: str) -> str:
+    """Summarise a long prompt for the WhatsApp acknowledgement."""
+    if len(text) <= 200:
+        return text
+    try:
+        settings = get_settings()
+        api_key = os.environ.get("MISTRAL_API_KEY") or settings.mistral_vibe_api_key
+        resp = httpx.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": "mistral-small-latest",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Summarise this task in under 200 characters. "
+                            "Preserve any repo URLs or branch names exactly:\n\n"
+                            f"{text}"
+                        ),
+                    }
+                ],
+                "max_tokens": 128,
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        summary = resp.json()["choices"][0]["message"]["content"]
+        return f"{summary}\n_(summarised)_"
+    except Exception:
+        return text[:200] + "..."
 
 
 async def process_message(msg: IncomingMessage) -> Reply:
@@ -76,10 +112,6 @@ async def _add_to_project(prompt: str, sender: str) -> Reply:
     # Check if there's an active job for this user
     existing_job = job_service.get_active_job(sender)
 
-    if existing_job and existing_job.status == JobStatus.WAITING_FOR_INPUT:
-        # User is responding to a question
-        print(f"[pipeline] Job for {sender} waiting for input, treating as new task")
-
     if not existing_job:
         # First time user - create initial job in host-accessible directory
         working_dir = (
@@ -97,23 +129,49 @@ async def _add_to_project(prompt: str, sender: str) -> Reply:
         job_service.add_conversation_message(job.id, "user", prompt)
         # Set as active job
         job_service.set_active_job(sender, job.id)
+        run_vibe_task.delay(str(job.id))
         print(f"[pipeline] First project for {sender}: {job.id}")
+    elif existing_job.status == JobStatus.WAITING_FOR_INPUT:
+        # Agent asked a question — use continue_vibe_task to preserve context
+        job_service.clear_progress_events(str(existing_job.id))
+        continue_vibe_task.delay(str(existing_job.id), prompt)
+        job = existing_job
+        print(f"[pipeline] Continuing job {job.id} with user response")
+    elif existing_job.status == JobStatus.PROCESSING:
+        # Previous task still running — queue the message, don't start a new run
+        job_service.add_conversation_message(existing_job.id, "user", prompt)
+        job = existing_job
+        print(f"[pipeline] Job {job.id} still processing, queued message")
+        display = _summarise_prompt(prompt)
+        return Reply(
+            type="text",
+            text=f"🎙️ {display}\n\n"
+                 "⏳ Still working on the previous task. I'll get to this next.",
+        )
     else:
-        # Reuse existing job - update prompt, reset status, add message
+        # Job is completed/failed/pending — reuse for a new task
         existing_job.prompt = prompt
         existing_job.status = JobStatus.PENDING
         job_service.add_conversation_message(existing_job.id, "user", prompt)
         job_service.save_job(existing_job)
-        # Clear stale progress events from previous run
         job_service.clear_progress_events(str(existing_job.id))
         job = existing_job
+        run_vibe_task.delay(str(job.id))
         print(f"[pipeline] Reusing project for {sender}: {job.id}")
 
-    run_vibe_task.delay(str(job.id))
+    display = _summarise_prompt(prompt)
+
+    if existing_job and existing_job.status == JobStatus.WAITING_FOR_INPUT:
+        return Reply(
+            type="text",
+            text=f"🎙️ {display}\n\n"
+                 f"Track progress: {settings.base_url}/jobs/{job.id}\n\n"
+                 "Continuing with your response...",
+        )
 
     return Reply(
         type="text",
-        text=f"Got it! Working on: {prompt[:50]}{'...' if len(prompt) > 50 else ''}\n\n"
-        f"Track progress: {settings.base_url}/jobs/{job.id}\n\n"
-        "I'll message you when done or if I need anything.",
+        text=f"🎙️ {display}\n\n"
+             f"Track progress: {settings.base_url}/jobs/{job.id}\n\n"
+             "I'll message you when done or if I need anything.",
     )

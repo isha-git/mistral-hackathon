@@ -14,7 +14,7 @@ from src.api.config.celery import celery_app
 from src.api.config.settings import get_settings
 from src.api.models.job import JobStatus, TurnResult
 from src.api.services.job_service import get_job_service
-from src.api.services.vibe_wrapper import run_vibe_task as run_vibe
+from src.agent.vibe_wrapper import run_vibe_task as run_vibe
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +184,41 @@ def _extract_question(output: str) -> str | None:
     return None
 
 
+def _summarise_for_whatsapp(text: str) -> str:
+    """Summarise long agent output for WhatsApp using Mistral."""
+    if len(text) <= 1500:
+        return text
+
+    try:
+        settings = get_settings()
+        api_key = os.environ.get("MISTRAL_API_KEY") or settings.mistral_vibe_api_key
+        resp = httpx.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": "mistral-small-latest",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Summarise this agent output for a WhatsApp message. "
+                            "Keep it concise (under 1000 chars) but preserve ALL "
+                            "URLs, branch names, and PR links exactly as they appear.\n\n"
+                            f"{text}"
+                        ),
+                    }
+                ],
+                "max_tokens": 512,
+            },
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.warning(f"Summarisation failed, truncating: {e}")
+        return text[:1500]
+
+
 def _notify_webhook(job, data: dict):
     """Send notification to webhook (WhatsApp) if configured."""
     settings = get_settings()
@@ -206,7 +241,7 @@ def _notify_webhook(job, data: dict):
             message = f"❓ {data.get('question', 'I have a question for you')}"
         elif status == "completed":
             result = data.get("result", "Task completed")
-            message = f"✅ Done!\n\n{result[:500]}{'...' if len(result) > 500 else ''}"
+            message = f"✅ Done!\n\n{_summarise_for_whatsapp(result)}"
         elif status == "failed":
             error = data.get("error", "Task failed")
             message = f"❌ Failed: {error[:200]}"

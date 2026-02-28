@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # WhatsApp callback - where to send agent questions/completions back to the user
     whatsapp_callback_url: str | None = None
 
+    # GitHub token for git operations (clone private repos, create PRs)
+    github_token: str | None = None
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

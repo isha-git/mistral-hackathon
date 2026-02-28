@@ -95,37 +95,10 @@ We follow vibe's session design:
                                              │ • commits    │
                                              │ • pushes     │
                                              │ • creates PR │
-                                             └──────┬───────┘
-                                                    │
-                                        PR opened on GitHub
-                                                    │
-                                                    ▼
-                                      ┌───────────────────────┐
-                                      │   GitHub Actions       │
-                                      │   (GitHub-hosted VM)   │
-                                      │                        │
-                                      │   ┌─────────────────┐  │
-                                      │   │    PR-Agent      │  │
-                                      │   │                  │  │
-                                      │   │  /describe       │  │
-                                      │   │  /review         │  │
-                                      │   │  /improve        │  │
-                                      │   └────────┬─────────┘  │
-                                      └────────────┼────────────┘
-                                                   │
-                                        posts review comments
-                                                   │
-                                                   ▼
-                                            ┌─────────────┐
-                                            │  GitHub PR   │
-                                            │              │
-                                            │ ✓ description│
-                                            │ ✓ review     │
-                                            │ ✓ suggestions│
-                                            └─────────────┘
+                                             └─────────────┘
 ```
 
-The bridge receives WhatsApp messages via a persistent connection and forwards them to the API over HTTP. Celery workers run Mistral Vibe to execute coding tasks. When Vibe creates a pull request, GitHub Actions triggers PR-Agent to automatically review it — no self-hosting required.
+The bridge receives WhatsApp messages via a persistent connection and forwards them to the API over HTTP. Celery workers run Mistral Vibe to execute coding tasks asynchronously.
 
 ## Testing
 
@@ -198,10 +171,6 @@ docker compose up --build
 ```
 docker-compose.yml          — orchestrates all services
 
-.github/workflows/
-  pr-agent.yml              — GitHub Actions workflow for automated PR reviews
-.pr_agent.toml              — PR-Agent configuration (review rules, model, etc.)
-
 src/whatsapp/               — WhatsApp bridge (Node/TypeScript)
   index.ts                  — entry point, wires socket + message loop
   connection.ts             — Baileys socket, QR display, credential persistence
@@ -224,30 +193,6 @@ src/api/                    — API service (Python/FastAPI)
       tts.py                — text-to-speech (placeholder)
   Dockerfile
 ```
-
-## PR-Agent (Automated PR Reviews)
-
-Every pull request is automatically reviewed by [PR-Agent](https://github.com/qodo-ai/pr-agent). When a PR is opened (including those created by the Vibe agent), GitHub Actions spins up a temporary VM, runs PR-Agent in a Docker container, and posts review comments — all on GitHub's infrastructure with no self-hosting required. Typical latency is 30–90 seconds after PR creation.
-
-PR-Agent runs three commands automatically:
-
-- **`/describe`** — generates a structured PR description with change walkthrough and Mermaid diagram
-- **`/review`** — security audit, effort estimation, and up to 5 code quality findings
-- **`/improve`** — actionable code suggestions posted as inline comments
-
-You can also trigger commands manually by commenting on any PR:
-`/review`, `/describe`, `/improve`, `/ask "your question"`
-
-### Setup
-
-Add one GitHub repo secret:
-
-1. Go to **Settings → Secrets and variables → Actions**
-2. Add `OPENAI_KEY` with your OpenAI API key
-
-`GITHUB_TOKEN` is provided automatically — no extra setup needed.
-
-Configuration lives in [`.pr_agent.toml`](.pr_agent.toml) at the repo root.
 
 ## Next Steps
 

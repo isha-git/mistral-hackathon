@@ -1,6 +1,8 @@
 """
 Direct Python API integration with Mistral Vibe.
 Loads session history from vibe's session directories.
+
+Restricts the agent to read-only code access + custom git tools.
 """
 
 import os
@@ -21,6 +23,35 @@ from vibe.core.config import VibeConfig
 from vibe.core.types import OutputFormat, LLMMessage, Role
 
 logger = logging.getLogger(__name__)
+
+# Read-only built-in tools + custom git tools
+_ENABLED_TOOLS = [
+    "grep",
+    "read_file",
+    "safe_write_file",      # replaces write_file — enforces branch safety
+    "ask_user_question",
+    "task",
+    "git_clone",
+    "git_branch",
+    "git_log",
+    "git_diff",
+    "git_status",
+    "git_pr",
+]
+
+_TOOLS_DIR = Path(__file__).parent / "tools"
+
+_AGENT_INSTRUCTIONS = """\
+IMPORTANT RULES — follow these for every task:
+- You MUST use your tools to complete tasks. Never give the user bash commands to run manually.
+- Use `safe_write_file` for ALL file writes. It automatically commits, pushes, and creates a GitHub PR.
+- Use `git_clone` to clone repos. Use `read_file` and `grep` to read code.
+- Use `git_branch` to checkout existing branches for reading.
+- You have GITHUB_TOKEN set. You can push and create PRs via your tools.
+- Do NOT say "I cannot do X" — use your available tools instead.
+- After using safe_write_file, tell the user the PR URL from the result.
+
+"""
 
 
 @dataclass
@@ -90,6 +121,20 @@ def _load_session_messages(working_dir: str) -> list[LLMMessage]:
     return []
 
 
+def _inject_github_token() -> None:
+    """Set GITHUB_TOKEN env var from settings if available."""
+    if os.environ.get("GITHUB_TOKEN"):
+        return  # Already set
+    try:
+        from src.api.config.settings import get_settings
+
+        settings = get_settings()
+        if settings.github_token:
+            os.environ["GITHUB_TOKEN"] = settings.github_token
+    except Exception:
+        pass  # Settings not available; token may still come from env
+
+
 def run_vibe_task(
     prompt: str,
     working_dir: Optional[str] = None,
@@ -100,6 +145,9 @@ def run_vibe_task(
     Run a vibe task programmatically without TUI.
     Loads conversation history from vibe's session files.
 
+    The agent is restricted to read-only tools + custom git tools.
+    bash, write_file, and search_replace are NOT available.
+
     Args:
         prompt: The task description/prompt
         working_dir: Working directory (creates temp if not provided)
@@ -109,18 +157,21 @@ def run_vibe_task(
     Returns:
         VibeResult with success status and output
     """
+    # Ensure GITHUB_TOKEN is in the environment
+    _inject_github_token()
+    logger.info(f"GITHUB_TOKEN present: {bool(os.environ.get('GITHUB_TOKEN'))}")
+
     # Setup working directory
     if working_dir is None:
         working_dir = tempfile.mkdtemp(prefix="vibe_work_")
 
+    # Ensure parent dir exists (bind mount may be missing if host dir was deleted)
+    parent = Path(working_dir).parent
+    parent.mkdir(parents=True, exist_ok=True)
     os.makedirs(working_dir, exist_ok=True)
 
-    # Initialize git if needed
-    git_dir = Path(working_dir) / ".git"
-    if not git_dir.exists():
-        import subprocess
-
-        subprocess.run(["git", "init"], cwd=working_dir, capture_output=True)
+    # NOTE: Do NOT git-init here. If the agent needs a repo, git_clone will
+    # create one with a proper origin. safe_write_file inits git as a fallback.
 
     logger.info(f"Running vibe task in {working_dir}")
     logger.info(f"Prompt: {prompt[:100]}...")
@@ -168,12 +219,44 @@ save_dir = "sessions"
 enabled = false
 """)
 
-        # Load config and run
+        # Load config and apply tool restrictions
         config = VibeConfig.load()
+        config.tool_paths = [_TOOLS_DIR]
+        config.enabled_tools = list(_ENABLED_TOOLS)
+
+        # Debug: log tool path state
+        logger.info(f"_TOOLS_DIR = {_TOOLS_DIR}")
+        logger.info(f"_TOOLS_DIR resolved = {_TOOLS_DIR.resolve()}")
+        logger.info(f"_TOOLS_DIR exists = {_TOOLS_DIR.resolve().exists()}")
+        logger.info(f"config.tool_paths = {config.tool_paths}")
+        logger.info(f"config.enabled_tools = {config.enabled_tools}")
+
+        if _TOOLS_DIR.resolve().exists():
+            tool_files = list(_TOOLS_DIR.resolve().glob("*.py"))
+            logger.info(f"Tool files found: {[f.name for f in tool_files]}")
+        else:
+            logger.error(f"TOOLS DIRECTORY DOES NOT EXIST: {_TOOLS_DIR.resolve()}")
+
+        # Diagnostic: verify custom tools are discoverable
+        try:
+            from vibe.core.tools.manager import ToolManager
+            mgr = ToolManager(lambda: config)
+            logger.info(f"ToolManager search paths: {mgr._search_paths}")
+            available = list(mgr.available_tools.keys())
+            logger.info(f"Available tools ({len(available)}): {available}")
+            expected = {
+                "git_clone", "git_log", "git_diff", "git_status",
+                "git_pr", "safe_write_file",
+            }
+            missing = expected - set(available)
+            if missing:
+                logger.warning(f"Custom tools NOT discovered: {missing}")
+        except Exception as e:
+            logger.warning(f"Tool discovery check failed: {e}", exc_info=True)
 
         output = run_programmatic(
             config=config,
-            prompt=prompt,
+            prompt=_AGENT_INSTRUCTIONS + prompt,
             max_turns=max_turns,
             output_format=OutputFormat.TEXT,
             previous_messages=final_messages if final_messages else None,

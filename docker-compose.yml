@@ -1,0 +1,36 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: src/api/Dockerfile
+    container_name: api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+
+  whatsapp-bridge:
+    build:
+      context: .
+      dockerfile: src/whatsapp/Dockerfile
+    container_name: whatsapp-bridge
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    environment:
+      - API_URL=http://api:8000
+    volumes:
+      - whatsapp-auth:/app/.auth
+    depends_on:
+      - api
+
+  # transcribe:
+  #   build:
+  #     context: .
+  #     dockerfile: src/transcribe/Dockerfile
+  #   container_name: transcribe
+  #   restart: unless-stopped
+
+volumes:
+  whatsapp-auth:

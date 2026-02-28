@@ -1,36 +1,79 @@
+version: '3.8'
+
+# SECURE CONFIGURATION FOR HOME SERVER
+# This configuration only exposes the API to localhost (127.0.0.1)
+# Use nginx or another reverse proxy if you need external access
+
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # NO PORTS EXPOSED - internal only
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - app-network
+
   api:
     build:
       context: .
-      dockerfile: src/api/Dockerfile
-    container_name: api
+      dockerfile: Dockerfile
     restart: unless-stopped
+    # ONLY bind to localhost - not accessible from internet
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
-      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - REDIS_URL=redis://redis:6379/0
+      - HOST=0.0.0.0
+      - PORT=8000
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health/live')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - app-network
+    # Security: Run as non-root
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
 
-  whatsapp-bridge:
+  worker:
     build:
       context: .
-      dockerfile: src/whatsapp/Dockerfile
-    container_name: whatsapp-bridge
+      dockerfile: Dockerfile
     restart: unless-stopped
-    stdin_open: true
-    tty: true
+    command: celery -A src.api.config.celery worker --loglevel=info --concurrency=2
     environment:
-      - API_URL=http://api:8000
-    volumes:
-      - whatsapp-auth:/app/.auth
+      - REDIS_URL=redis://redis:6379/0
+    env_file:
+      - .env
     depends_on:
-      - api
-
-  # transcribe:
-  #   build:
-  #     context: .
-  #     dockerfile: src/transcribe/Dockerfile
-  #   container_name: transcribe
-  #   restart: unless-stopped
+      redis:
+        condition: service_healthy
+    networks:
+      - app-network
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
-  whatsapp-auth:
+  redis_data:
+
+networks:
+  app-network:
+    driver: bridge
+    # Internal network only
+    internal: false

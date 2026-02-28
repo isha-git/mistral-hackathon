@@ -1,132 +1,170 @@
-# mistral-hackathon
+# WhatsApp + Mistral Vibe Coding Agent
 
-Mistral hackathon 2026 — WhatsApp bridge that forwards messages to an API and sends responses back.
+A WhatsApp bridge that lets you chat with Mistral Vibe to write code. All projects persist on your local filesystem.
 
-## Prerequisites
+## How It Works
 
-- [Docker](https://docs.docker.com/get-docker/) installed and running
-- A spare phone number with WhatsApp (this becomes the bot's number)
-- An [ElevenLabs API key](https://elevenlabs.io/app/settings/api-keys)
+**One WhatsApp number = One persistent coding project**
+
+- Send any message → Vibe creates/modifies code in your project
+- Files saved to `./vibe_repos/` (visible on your host machine)
+- Session history tracked automatically via vibe's sessions
+- Type `/new_project` to start fresh
 
 ## Quick Start
 
 ```bash
-# Set up your environment
+# 1. Set up environment
 cp .env.example .env
-# Edit .env and add your ELEVENLABS_API_KEY
+# Edit .env and add your MISTRAL_VIBE_API_KEY
 
-# Build and start everything (API + WhatsApp bridge)
+# 2. Start everything
 docker compose up --build
+
+# 3. Scan QR code with bot's phone
+# WhatsApp > Settings > Linked Devices > Link a Device
 ```
 
-A QR code will appear in the terminal. On the **bot's phone**:
+## Usage
 
-1. Open WhatsApp > Settings > Linked Devices > Link a Device
-2. Scan the QR code
+Send messages from **your personal WhatsApp** to the bot's number:
 
-The terminal will log `Connected!` once paired. Credentials are saved — you won't need to scan again on restart.
-
-## Architecture
-
-```
-                         Docker Compose
-                 ┌──────────────────────────────┐
-                 │                               │
- ┌───────────┐   │  ┌──────────┐   ┌──────────┐  │
- │  User's   │───┼─>│ WhatsApp │──>│   API    │  │
- │  Phone    │   │  │  Bridge  │   │ (FastAPI) │  │
- │ (WhatsApp)│<──┼──│  (Node)  │<──│          │  │
- └───────────┘   │  └──────────┘   └────┬─────┘  │
-                 │       │              │         │
-                 │       v              v         │
-                 │       │              │         │
-                 │       v              v         │
-                 │  ┌──────────┐  ┌───────────┐  │
-                 │  │   Auth   │  │ ElevenLabs │  │
-                 │  │  Volume  │  │ STT / TTS  │  │
-                 │  └──────────┘  └───────────┘  │
-                 └──────────────────────────────┘
-
- ── text / voice / image ──>     ── POST /webhook ──>
- <── reply (text/audio/image) ── <── JSON response ──
-```
-
-The bridge receives WhatsApp messages via a persistent connection and forwards them to the API over HTTP. The API processes the message and returns a reply. Both services run in Docker on the same network.
-
-## Testing
-
-Send messages **from your personal WhatsApp** to the bot's phone number:
-
-| You send | Bot replies |
-|---|---|
-| `hello` (text) | `hello` (echo, Mistral integration later) |
-| A voice note | Transcribed text (via ElevenLabs STT) |
-| An image with caption "test" | `test` (echo for now) |
-
-You can also test the API directly:
-
-```bash
-# Health check
-curl http://localhost:8000/health
-
-# Send a test message
-curl -X POST http://localhost:8000/webhook \
-  -H 'Content-Type: application/json' \
-  -d '{"sender":"test","type":"text","text":"hello"}'
-```
-
-## Stopping and Restarting
-
-```bash
-# Stop
-docker compose down
-
-# Restart (no QR scan needed — credentials persist in Docker volume)
-docker compose up
-
-# Force a fresh QR pairing
-docker compose down -v
-docker compose up --build
-```
-
-## Logs
-
-```bash
-docker compose logs -f                # all services
-docker compose logs -f whatsapp-bridge # bridge only
-docker compose logs -f api             # API only
-```
+| Message | What Happens |
+|---------|--------------|
+| `create a fastapi app` | Vibe creates `main.py`, `requirements.txt` |
+| `add a /users endpoint` | Vibe adds endpoint to existing `main.py` |
+| `run uvicorn and test it` | Vibe starts server, sends curl requests |
+| `/new_project` | Clears history, starts fresh project |
 
 ## Project Structure
 
 ```
-docker-compose.yml          — orchestrates both services
-
-src/whatsapp/               — WhatsApp bridge (Node/TypeScript)
-  index.ts                  — entry point, wires socket + message loop
-  connection.ts             — Baileys socket, QR display, credential persistence
-  message.ts                — parses incoming messages into structured format
-  media.ts                  — download/send media (audio, images, text)
-  handler.ts                — forwards messages to the API, parses replies
-  Dockerfile
-
-src/api/                    — API service (Python/FastAPI)
-  main.py                   — FastAPI app, mounts routes
-  models.py                 — request/response schemas (Pydantic)
-  routes/
-    webhook.py              — POST /webhook — receives messages, returns replies
-    health.py               — GET /health
-  services/
-    pipeline.py             — orchestrates: STT → Mistral (later) → TTS (later)
-    elevenlabs/
-      client.py             — shared ElevenLabs API client
-      stt.py                — speech-to-text (voice → text)
-      tts.py                — text-to-speech (placeholder)
-  Dockerfile
+vibe_repos/
+└── user-<phone_number>/          # Your project directory
+    ├── main.py                   # Code files
+    ├── requirements.txt
+    ├── calculator.py
+    └── sessions/                 # Vibe conversation history
+        └── session_20260228.../  # Each run gets session dir
+            ├── messages.jsonl    # Full conversation
+            └── meta.json         # Session metadata
 ```
 
-## Next Steps
+**Files are visible on your host machine** at `./vibe_repos/`
 
-1. Add Mistral integration in `src/api/services/mistral.py` — send transcribed text, get a response
-2. Add ElevenLabs TTS in `src/api/services/elevenlabs/tts.py` — convert Mistral's response to audio
-3. Wire both into `src/api/services/pipeline.py` to complete the chain: voice → text → Mistral → audio → WhatsApp
+## Session Continuity
+
+We follow vibe's session design:
+
+1. **First message** → Creates `sessions/session_<timestamp>/`
+2. **Follow-up messages** → Load previous session messages, continue conversation
+3. **New session dir** created for each run (vibe's telemetry)
+4. **Working directory** reused → Code files persist across runs
+
+## Architecture
+
+```
+┌─────────────┐     WhatsApp      ┌─────────────┐
+│   Your      │ ────────────────> │  WhatsApp   │
+│   Phone     │                   │   Bridge    │
+│             │ <──────────────── │   (Node)    │
+└─────────────┘     Response      └──────┬──────┘
+                                         │
+                                         │ HTTP
+                                         │
+                              ┌──────────▼──────────┐
+                              │       API           │
+                              │    (FastAPI)        │
+                              │                     │
+                              │ ┌─────────────────┐ │
+                              │ │  Pipeline:      │ │
+                              │ │ One job/user    │ │
+                              │ │ Reuse working   │ │
+                              │ │ dir across msgs │ │
+                              │ └─────────────────┘ │
+                              └──────────┬──────────┘
+                                         │
+                              ┌──────────▼──────────┐
+                              │      Worker         │
+                              │    (Celery)         │
+                              │                     │
+                              │ Load session msgs   │
+                              │ from vibe's files   │
+                              │                     │
+                              │ Run via direct      │
+                              │ Python API          │
+                              │ (no subprocess)     │
+                              └──────────┬──────────┘
+                                         │
+                              ┌──────────▼──────────┐
+                              │   vibe_repos/       │
+                              │   (bind mount)      │
+                              │   Host filesystem   │
+                              └─────────────────────┘
+```
+
+## Testing
+
+```bash
+# Check API health
+curl http://localhost:8000/health
+
+# List all jobs
+curl http://localhost:8000/tasks \
+  -H "Authorization: Bearer <API_KEY>"
+
+# Check specific job
+curl http://localhost:8000/tasks/<job_id> \
+  -H "Authorization: Bearer <API_KEY>"
+```
+
+## Commands
+
+- **Any text** → Vibe will create/modify code based on your request
+- **`/new_project`** → Start fresh (clears conversation history)
+
+## Key Features
+
+✅ **Persistent Projects** - One WhatsApp number = one project  
+✅ **Host Access** - Files saved to `./vibe_repos/` on your machine  
+✅ **Session Continuity** - Vibe sees full conversation history  
+✅ **Git Integration** - Each working dir is a git repo  
+✅ **No Subprocess** - Uses vibe's direct Python API  
+
+## Logs
+
+```bash
+docker compose logs -f              # All services
+docker compose logs -f whatsapp   # WhatsApp bridge only
+docker compose logs -f worker     # Vibe worker only
+docker compose logs -f api        # API only
+```
+
+## Troubleshooting
+
+**Permission denied on vibe_repos files:**
+```bash
+# Files created as root in container
+sudo chown -R $USER:$USER ./vibe_repos/
+```
+
+**WhatsApp not connecting:**
+```bash
+# Force re-pairing
+docker compose down -v
+docker compose up --build
+```
+
+**Restart with fresh state:**
+```bash
+docker compose down -v
+docker compose up --build
+```
+
+## Implementation Notes
+
+- Uses `vibe.core.programmatic.run_programmatic()` for non-interactive execution
+- Loads previous messages from `sessions/session_*/messages.jsonl`
+- Working directory determined by sender ID: `vibe_repos/user-<sender>/`
+- Celery handles async job processing
+- Redis for job queue and state persistence

@@ -112,7 +112,7 @@ class VibeInteractiveWrapper:
 
         # If we haven't reached max turns and more work might be needed,
         # we could continue automatically or wait for user input
-        while self.current_turn < self.max_turns and not result.needs_input:
+        while self.current_turn < self.max_turns:
             # Check if the task seems complete
             if self._is_task_complete(output):
                 break

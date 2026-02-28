@@ -1,0 +1,21 @@
+[config]
+model = "gpt-4o"
+git_provider = "github"
+
+[pr_reviewer]
+require_tests_review = true
+require_security_review = true
+enable_review_labels_effort = true
+num_max_findings = 5
+extra_instructions = "This is a WhatsApp-to-Mistral Vibe coding agent. Pay attention to API security, proper async handling, Redis session management, and Docker configuration."
+
+[pr_description]
+generate_ai_title = false
+publish_labels = true
+enable_pr_diagram = true
+use_bullet_points = true
+
+[pr_code_suggestions]
+num_code_suggestions_per_chunk = 4
+suggestions_score_threshold = 0
+focus_only_on_problems = true

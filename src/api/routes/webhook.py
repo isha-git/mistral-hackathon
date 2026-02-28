@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
-from api.models import IncomingMessage, Reply
-from api.services.pipeline import process_message
+from src.api.models.job import IncomingMessage, Reply
+from src.api.services.pipeline import process_message
 
 router = APIRouter()
 

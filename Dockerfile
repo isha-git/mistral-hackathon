@@ -1,25 +1,32 @@
-FROM python:3.14-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    git \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency files
-COPY pyproject.toml uv.lock ./
+# Copy dependency files first
+COPY pyproject.toml ./
 
-# Install dependencies
-RUN pip install --no-cache-dir uv && \
-    uv pip install --system -e .
+# Install Python dependencies as root (needed for compilation)
+RUN pip install --no-cache-dir uv
+RUN pip install --no-cache-dir -e .
 
 # Copy application code
 COPY src/ ./src/
 
+# Create directories for persistence
+RUN mkdir -p /app/vibe_repos /app/.vibe
+
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-USER appuser
+
+# Set environment variables
+ENV VIBE_HOME=/app/.vibe
 
 # Expose port
 EXPOSE 8000

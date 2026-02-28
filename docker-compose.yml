@@ -49,8 +49,14 @@ services:
       - HOST=0.0.0.0
       - PORT=8000
       - WHATSAPP_CALLBACK_URL=http://whatsapp:3001/send
+      - VIBE_HOME=/app/.vibe
     env_file:
       - .env
+    volumes:
+      # Persist Vibe sessions (conversation history)
+      - vibe_sessions:/app/.vibe
+      # Bind mount working directories for host access
+      - ./vibe_repos:/app/vibe_repos
     depends_on:
       redis:
         condition: service_healthy
@@ -75,12 +81,23 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     command: celery -A src.api.config.celery worker --loglevel=info --concurrency=2
+    tty: true
+    stdin_open: true
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - VIBE_HOME=/app/.vibe
+      - MISTRAL_API_KEY=${MISTRAL_VIBE_API_KEY}
     env_file:
       - .env
+    volumes:
+      # Same volumes as API - worker needs access to sessions and repos
+      - vibe_sessions:/app/.vibe
+      # Bind mount working directories for host access
+      - ./vibe_repos:/app/vibe_repos
     depends_on:
       redis:
+        condition: service_healthy
+      api:
         condition: service_healthy
     networks:
       - app-network
@@ -90,6 +107,11 @@ services:
 volumes:
   redis_data:
   whatsapp-auth:
+  vibe_sessions:
+    # Vibe CLI session data (conversation history, config)
+
+# Bind mounts for host-accessible directories
+# vibe_repos is mapped to ./vibe_repos on host
 
 networks:
   app-network:

@@ -1,11 +1,26 @@
-import subprocess
+"""
+Direct Python API integration with Mistral Vibe.
+Loads session history from vibe's session directories.
+"""
+
 import os
+import json
 import re
 import tempfile
-import shutil
+import logging
 from pathlib import Path
-from typing import Iterator, Optional
 from dataclasses import dataclass, field
+from typing import Optional
+
+# Import vibe direct API (no TUI)
+from vibe.core.paths.config_paths import unlock_config_paths
+
+unlock_config_paths()
+from vibe.core.programmatic import run_programmatic
+from vibe.core.config import VibeConfig
+from vibe.core.types import OutputFormat, LLMMessage, Role
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -18,178 +33,174 @@ class VibeResult:
     error: Optional[str] = None
 
 
-class VibeInteractiveWrapper:
+def _load_session_messages(working_dir: str) -> list[LLMMessage]:
     """
-    Interactive wrapper around Mistral Vibe CLI.
+    Load messages from vibe's latest session in the working directory.
 
-    This wrapper manages long-running sessions with state preservation.
-    It can handle task delegation and input requests by:
-    1. Running vibe with a prompt
-    2. Detecting if more information is needed
-    3. Continuing the session with user input
+    Returns list of LLMMessage objects for previous_messages parameter.
     """
+    sessions_dir = Path(working_dir) / "sessions"
+    if not sessions_dir.exists():
+        return []
 
-    def __init__(self, working_dir: Optional[str] = None, max_turns: int = 50):
-        self.working_dir = working_dir or tempfile.mkdtemp(prefix="vibe_work_")
-        self.max_turns = max_turns
-        self.session_history: list[dict] = []
-        self.current_turn = 0
+    # Find all session directories
+    session_dirs = [d for d in sessions_dir.iterdir() if d.is_dir()]
+    if not session_dirs:
+        return []
 
-    def _run_vibe(
-        self, prompt: str, output_format: str = "text", continue_session: bool = False
-    ) -> tuple[str, int]:
-        """Run vibe CLI and return output."""
-        cmd = ["vibe", "--prompt", prompt, "--output", output_format]
+    # Sort by modification time (latest first)
+    session_dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
 
-        if continue_session and self.session_history:
-            # Continue from previous session
-            cmd.append("--continue")
-
-        # Ensure working directory exists
-        os.makedirs(self.working_dir, exist_ok=True)
-
-        # Initialize git if not exists (vibe needs git)
-        git_dir = Path(self.working_dir) / ".git"
-        if not git_dir.exists():
-            subprocess.run(["git", "init"], cwd=self.working_dir, capture_output=True)
+    messages = []
+    for session_dir in session_dirs:
+        messages_file = session_dir / "messages.jsonl"
+        if not messages_file.exists():
+            continue
 
         try:
-            result = subprocess.run(
-                cmd,
-                cwd=self.working_dir,
-                capture_output=True,
-                text=True,
-                timeout=600,  # 10 minute timeout per turn
+            with open(messages_file, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    msg_data = json.loads(line)
+
+                    # Convert vibe's format to LLMMessage
+                    role_str = msg_data.get("role", "").lower()
+                    content = msg_data.get("content", "")
+
+                    if role_str == "user":
+                        role = Role.user
+                    elif role_str == "assistant":
+                        role = Role.assistant
+                    else:
+                        continue  # Skip system/tool messages for continuity
+
+                    messages.append(LLMMessage(role=role, content=content))
+
+            logger.info(
+                f"Loaded {len(messages)} messages from session {session_dir.name}"
             )
-            return result.stdout + result.stderr, result.returncode
-        except subprocess.TimeoutExpired:
-            return "Error: Vibe execution timed out", 1
-        except Exception as e:
-            return f"Error running vibe: {str(e)}", 1
+            return messages  # Return messages from latest valid session
 
-    def _parse_output(self, output: str, output_format: str) -> VibeResult:
-        """Parse vibe output to extract results and detect questions."""
-        result = VibeResult(success=True, output=output)
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Failed to load session {session_dir}: {e}")
+            continue
 
-        # Check for errors in output
-        if "error" in output.lower() or "Traceback" in output:
-            result.error = output
+    return []
 
-        # Extract file changes
-        if "File created:" in output or "file created" in output.lower():
-            files = re.findall(r"File created:\s*`?([^`\n]+)", output)
-            result.files_changed.extend(files)
 
-        return result
+def run_vibe_task(
+    prompt: str,
+    working_dir: Optional[str] = None,
+    max_turns: int = 10,
+    previous_messages: Optional[list] = None,
+) -> VibeResult:
+    """
+    Run a vibe task programmatically without TUI.
+    Loads conversation history from vibe's session files.
 
-    def start_task(self, prompt: str) -> Iterator[VibeResult]:
-        """
-        Start a new task and yield results.
+    Args:
+        prompt: The task description/prompt
+        working_dir: Working directory (creates temp if not provided)
+        max_turns: Maximum number of turns
+        previous_messages: Optional list of previous messages (deprecated, use working_dir sessions)
 
-        If vibe needs input, it will yield a result with needs_input=True.
-        The caller should then call continue_task() with the user's response.
-        """
-        # Build the full prompt with context about working directory
-        full_prompt = self._build_prompt(prompt)
+    Returns:
+        VibeResult with success status and output
+    """
+    # Setup working directory
+    if working_dir is None:
+        working_dir = tempfile.mkdtemp(prefix="vibe_work_")
 
-        output, returncode = self._run_vibe(full_prompt, output_format="text")
+    os.makedirs(working_dir, exist_ok=True)
 
-        result = self._parse_output(output, "text")
-        result.success = returncode == 0
+    # Initialize git if needed
+    git_dir = Path(working_dir) / ".git"
+    if not git_dir.exists():
+        import subprocess
 
-        # Store in history
-        self.session_history.append(
-            {
-                "turn": self.current_turn,
-                "prompt": prompt,
-                "output": output,
-                "success": result.success,
-            }
-        )
-        self.current_turn += 1
+        subprocess.run(["git", "init"], cwd=working_dir, capture_output=True)
 
-        yield result
+    logger.info(f"Running vibe task in {working_dir}")
+    logger.info(f"Prompt: {prompt[:100]}...")
 
-        # If we haven't reached max turns and more work might be needed,
-        # we could continue automatically or wait for user input
-        while self.current_turn < self.max_turns and not result.needs_input:
-            # Check if the task seems complete
-            if self._is_task_complete(output):
-                break
+    # Load previous messages from vibe's session files
+    session_messages = _load_session_messages(working_dir)
 
-            # Auto-continue with a follow-up prompt
-            follow_up = "Continue with the implementation."
-            output, returncode = self._run_vibe(
-                follow_up, output_format="text", continue_session=True
-            )
+    # Use provided previous_messages if given, otherwise use loaded sessions
+    if previous_messages:
+        # Convert dict format to LLMMessage if needed
+        final_messages = []
+        for msg in previous_messages:
+            if isinstance(msg, dict):
+                role_str = msg.get("role", "user")
+                content = msg.get("content", "")
+                role = Role.assistant if role_str == "assistant" else Role.user
+                final_messages.append(LLMMessage(role=role, content=content))
+            elif isinstance(msg, LLMMessage):
+                final_messages.append(msg)
+    else:
+        final_messages = session_messages
 
-            result = self._parse_output(output, "text")
-            result.success = returncode == 0
-
-            self.session_history.append(
-                {
-                    "turn": self.current_turn,
-                    "prompt": follow_up,
-                    "output": output,
-                    "success": result.success,
-                }
-            )
-            self.current_turn += 1
-
-            yield result
-
-    def continue_task(self, user_response: str) -> Iterator[VibeResult]:
-        """
-        Continue a task with user input.
-
-        This sends the user's response to vibe and continues the session.
-        """
-        output, returncode = self._run_vibe(
-            user_response, output_format="text", continue_session=True
+    if final_messages:
+        logger.info(
+            f"Continuing with {len(final_messages)} previous messages from session"
         )
 
-        result = self._parse_output(output, "text")
-        result.success = returncode == 0
+    # Save and change directory
+    original_dir = os.getcwd()
+    os.chdir(working_dir)
 
-        self.session_history.append(
-            {
-                "turn": self.current_turn,
-                "prompt": f"[User response]: {user_response}",
-                "output": output,
-                "success": result.success,
-            }
+    try:
+        # Setup vibe config directory if not exists
+        vibe_home = Path(os.environ.get("VIBE_HOME", Path.home() / ".vibe"))
+        vibe_home.mkdir(parents=True, exist_ok=True)
+
+        # Create minimal config - keep session logging enabled so vibe tracks history
+        config_file = vibe_home / "config.toml"
+        if not config_file.exists():
+            config_file.write_text("""[session_logging]
+enabled = true
+save_dir = "sessions"
+
+[telemetry]
+enabled = false
+""")
+
+        # Load config and run
+        config = VibeConfig.load()
+
+        output = run_programmatic(
+            config=config,
+            prompt=prompt,
+            max_turns=max_turns,
+            output_format=OutputFormat.TEXT,
+            previous_messages=final_messages if final_messages else None,
         )
-        self.current_turn += 1
 
-        yield result
+        result = output or "Task completed with no output"
 
-    def _build_prompt(self, user_prompt: str) -> str:
-        """Build the full prompt with context."""
-        # Include information about the working directory
-        context = f"""Working in directory: {self.working_dir}
+        logger.info(f"Vibe completed successfully")
+        logger.info(f"Output: {result[:200]}...")
 
-User request: {user_prompt}
+        # Extract file changes from output
+        files_changed = []
+        if "File created:" in result:
+            files_changed = re.findall(r"File created:\s*`?([^`\n]+)", result)
 
-Important: 
-- Clone any repositories you need into this working directory
-- Create new branches for changes
-- Make commits as you progress
-- All file operations should happen in {self.working_dir} or subdirectories
-"""
-        return context
+        return VibeResult(
+            success=True,
+            output=result,
+            files_changed=files_changed,
+        )
 
-    def _is_task_complete(self, output: str) -> bool:
-        """Heuristic to detect if vibe considers the task complete."""
-        completion_indicators = [
-            "task completed",
-            "done",
-            "finished",
-            "created successfully",
-            "completed successfully",
-        ]
-        output_lower = output.lower()
-        return any(indicator in output_lower for indicator in completion_indicators)
-
-    def get_working_directory(self) -> str:
-        """Get the working directory path."""
-        return self.working_dir
+    except Exception as e:
+        logger.error(f"Vibe error: {e}")
+        return VibeResult(
+            success=False,
+            output="",
+            error=str(e),
+        )
+    finally:
+        os.chdir(original_dir)

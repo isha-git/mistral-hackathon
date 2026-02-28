@@ -1,165 +1,139 @@
-import httpx
+"""
+Celery tasks for running Mistral Vibe via direct Python API.
+"""
+
 import os
-import tempfile
 import re
+import logging
 from datetime import datetime
 from celery.exceptions import SoftTimeLimitExceeded
+
+import httpx
 
 from src.api.config.celery import celery_app
 from src.api.config.settings import get_settings
 from src.api.models.job import JobStatus, TurnResult
 from src.api.services.job_service import get_job_service
-from src.api.services.vibe_wrapper import VibeInteractiveWrapper
+from src.api.services.vibe_wrapper import run_vibe_task as run_vibe
 
-
-def _get_repo_name(repo_url: str) -> str:
-    """Extract repo name from URL."""
-    repo_name = repo_url.rstrip("/").split("/")[-1]
-    if repo_name.endswith(".git"):
-        repo_name = repo_name[:-4]
-    return repo_name
-
-
-def _build_persistent_working_dir(repo_url: str, branch_name: str) -> str:
-    """Build a persistent working directory path for repo/branch."""
-    repo_name = _get_repo_name(repo_url)
-    base_dir = os.path.join(os.getcwd(), "vibe_repos")
-    work_dir = os.path.join(base_dir, f"{repo_name}_{branch_name}")
-    return work_dir
+logger = logging.getLogger(__name__)
 
 
 @celery_app.task(bind=True, max_retries=3)
 def run_vibe_task(self, job_id: str):
     """
-    Celery task to run Mistral Vibe with stateful working directories.
+    Celery task to run Mistral Vibe job.
 
-    Key features:
-    - Reuses working directory for same repo/branch
-    - Detects when agent needs clarification
-    - Maintains full conversation history
+    Uses direct Python API - no subprocess, no TUI.
     """
+    logger.info(f"[Job {job_id}] Starting vibe task")
     job_service = get_job_service()
     settings = get_settings()
 
     job = job_service.get_job(job_id)
     if not job:
+        logger.error(f"[Job {job_id}] Job not found")
         raise ValueError(f"Job {job_id} not found")
+
+    logger.info(f"[Job {job_id}] Loaded job with prompt: {job.prompt[:100]}...")
+    logger.info(f"[Job {job_id}] Session ID: {job.session_id}")
 
     try:
         # Update status to processing
+        logger.info(f"[Job {job_id}] Updating status to PROCESSING")
         job_service.update_job_status(job_id, JobStatus.PROCESSING)
 
         # Determine working directory
         if job.working_dir:
-            # Use explicitly provided working directory
             worktree_path = job.working_dir
-        elif job.repo_url and job.branch_name:
-            # Use persistent directory for repo/branch
-            worktree_path = _build_persistent_working_dir(job.repo_url, job.branch_name)
-            # Check if this directory already exists from previous job
-            if os.path.exists(worktree_path):
-                print(f"Reusing existing working directory: {worktree_path}")
         else:
-            # Create temporary directory
-            worktree_path = tempfile.mkdtemp(prefix="vibe_work_")
+            worktree_path = os.path.join(os.getcwd(), "vibe_work", job_id)
+            os.makedirs(worktree_path, exist_ok=True)
+            job_service.set_working_directory(job_id, worktree_path)
 
-        # Ensure directory exists
-        os.makedirs(worktree_path, exist_ok=True)
+        logger.info(f"[Job {job_id}] Working directory: {worktree_path}")
 
-        # Save working directory
-        job_service.set_working_directory(job_id, worktree_path)
-
-        # Create vibe wrapper
-        wrapper = VibeInteractiveWrapper(
-            working_dir=worktree_path, max_turns=job.max_turns
+        # Vibe loads previous messages automatically from sessions/ directory
+        logger.info(
+            f"[Job {job_id}] Running vibe task (will load session from {worktree_path})"
+        )
+        result = run_vibe(
+            prompt=job.prompt,
+            working_dir=worktree_path,
+            max_turns=job.max_turns,
         )
 
-        # Build prompt with clear instructions about asking questions
-        full_prompt = _build_prompt(job)
+        logger.info(f"[Job {job_id}] Vibe completed with success: {result.success}")
+        logger.info(f"[Job {job_id}] Output preview: {result.output[:200]}...")
 
-        # Run vibe session
-        final_result = None
-        for result in wrapper.start_task(full_prompt):
-            # Store turn result
-            turn_result = TurnResult(
-                turn_number=job.current_turn + 1,
-                prompt=full_prompt if job.current_turn == 0 else "Continue",
-                output=result.output,
-                success=result.success,
-                files_changed=result.files_changed,
-                timestamp=datetime.utcnow(),
+        # Store turn result
+        turn_result = TurnResult(
+            turn_number=1,
+            prompt=job.prompt,
+            output=result.output,
+            success=result.success,
+            files_changed=result.files_changed,
+        )
+        job_service.add_turn_result(job_id, turn_result)
+
+        # Add agent response to conversation for continuity
+        if result.output:
+            job_service.add_conversation_message(
+                job_id, "agent", result.output[:1000]
+            )  # Limit size
+
+        # Check if agent is asking a question
+        question = _extract_question(result.output)
+        if question:
+            logger.info(f"[Job {job_id}] Agent is asking a question: {question}")
+            job_service.set_agent_question(job_id, question)
+            _notify_webhook(
+                job,
+                {
+                    "status": "needs_input",
+                    "question": question,
+                    "job_id": str(job_id),
+                    "session_id": job.session_id,
+                    "working_dir": worktree_path,
+                    "current_turn": 1,
+                },
             )
-            job_service.add_turn_result(job_id, turn_result)
+            return {"status": "waiting_for_input", "job_id": job_id}
 
-            # Add to conversation
-            if result.output:
-                job_service.add_conversation_message(job_id, "agent", result.output)
-
-            # Check if vibe is asking for input (enhanced detection)
-            question = _extract_question(result.output)
-            if question:
-                job_service.set_agent_question(job_id, question)
-                _notify_webhook(
-                    job,
-                    {
-                        "status": "needs_input",
-                        "question": question,
-                        "job_id": str(job_id),
-                        "session_id": job.session_id,
-                        "working_dir": worktree_path,
-                        "current_turn": job.current_turn,
-                        "repo_url": job.repo_url,
-                        "branch_name": job.branch_name,
-                    },
-                )
-                # Pause here - user needs to respond
-                return {"status": "waiting_for_input", "job_id": job_id}
-
-            # If failed, mark job as failed
-            if not result.success:
-                job_service.update_job_status(
-                    job_id,
-                    JobStatus.FAILED,
-                    error_message=result.error or "Task failed",
-                )
-                _notify_webhook(
-                    job,
-                    {
-                        "status": "failed",
-                        "error": result.error or "Task failed",
-                        "job_id": str(job_id),
-                    },
-                )
-                return {"status": "failed", "job_id": job_id}
-
-            final_result = result
-
-        # All turns completed successfully
-        final_output = (
-            wrapper.session_history[-1]["output"]
-            if wrapper.session_history
-            else "Task completed"
-        )
-
-        job_service.update_job_status(job_id, JobStatus.COMPLETED, result=final_output)
-
-        _notify_webhook(
-            job,
-            {
-                "status": "completed",
-                "result": final_output,
-                "job_id": str(job_id),
-                "session_id": job.session_id,
-                "working_dir": worktree_path,
-                "branch": job.branch_name,
-                "total_turns": wrapper.current_turn,
-                "files_changed": _get_all_files_changed(job),
-            },
-        )
-
-        return {"status": "completed", "job_id": job_id}
+        # Task completed successfully
+        if result.success:
+            logger.info(f"[Job {job_id}] Marking job as COMPLETED")
+            job_service.update_job_status(
+                job_id, JobStatus.COMPLETED, result=result.output
+            )
+            _notify_webhook(
+                job,
+                {
+                    "status": "completed",
+                    "result": result.output,
+                    "job_id": str(job_id),
+                    "files_changed": result.files_changed,
+                },
+            )
+            return {"status": "completed", "job_id": job_id, "result": result.output}
+        else:
+            # Task failed
+            logger.error(f"[Job {job_id}] Task failed: {result.error}")
+            job_service.update_job_status(
+                job_id, JobStatus.FAILED, error_message=result.error or "Task failed"
+            )
+            _notify_webhook(
+                job,
+                {
+                    "status": "failed",
+                    "error": result.error or "Task failed",
+                    "job_id": str(job_id),
+                },
+            )
+            return {"status": "failed", "job_id": job_id, "error": result.error}
 
     except SoftTimeLimitExceeded:
+        logger.error(f"[Job {job_id}] Task exceeded soft time limit")
         job_service.update_job_status(
             job_id,
             JobStatus.TIMEOUT,
@@ -169,11 +143,16 @@ def run_vibe_task(self, job_id: str):
         raise
 
     except Exception as e:
+        logger.error(f"[Job {job_id}] Exception occurred: {str(e)}")
+        logger.exception(f"[Job {job_id}] Full exception details:")
         if self.request.retries < settings.job_retry_count:
-            raise self.retry(
-                countdown=settings.job_retry_delay * (self.request.retries + 1)
+            retry_count = self.request.retries + 1
+            logger.info(
+                f"[Job {job_id}] Retrying ({retry_count}/{settings.job_retry_count})"
             )
+            raise self.retry(countdown=settings.job_retry_delay * retry_count)
 
+        logger.error(f"[Job {job_id}] All retries exhausted, marking as FAILED")
         job_service.update_job_status(job_id, JobStatus.FAILED, error_message=str(e))
         _notify_webhook(
             job, {"status": "failed", "error": str(e), "job_id": str(job_id)}
@@ -181,11 +160,85 @@ def run_vibe_task(self, job_id: str):
         raise
 
 
+def _extract_question(output: str) -> str | None:
+    """Extract question from vibe output if agent is asking for clarification."""
+    # Look for QUESTION: prefix
+    if "QUESTION:" in output:
+        match = re.search(r"QUESTION:\s*(.+?)(?:\n|$)", output, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+
+    # Check for question patterns
+    question_patterns = [
+        r"(?:what|which|how|where|when|why|who|can you|could you).+\?",
+        r"please clarify",
+        r"need more information",
+        r"missing details",
+    ]
+
+    for pattern in question_patterns:
+        match = re.search(pattern, output, re.IGNORECASE)
+        if match:
+            return match.group(0).strip()
+
+    return None
+
+
+def _notify_webhook(job, data: dict):
+    """Send notification to webhook (WhatsApp) if configured."""
+    settings = get_settings()
+    if not settings.whatsapp_callback_url:
+        return
+
+    try:
+        # Extract WhatsApp number from session_id (format: "whatsapp-<number>")
+        recipient = job.session_id
+        if recipient and recipient.startswith("whatsapp-"):
+            recipient = recipient.replace("whatsapp-", "")
+
+        if not recipient:
+            logger.warning(f"No recipient found for job {job.id}")
+            return
+
+        # Build message based on status
+        status = data.get("status")
+        if status == "needs_input":
+            message = f"❓ {data.get('question', 'I have a question for you')}"
+        elif status == "completed":
+            result = data.get("result", "Task completed")
+            message = f"✅ Done!\n\n{result[:500]}{'...' if len(result) > 500 else ''}"
+        elif status == "failed":
+            error = data.get("error", "Task failed")
+            message = f"❌ Failed: {error[:200]}"
+        elif status == "timeout":
+            message = "⏱️ Task timed out. Please try again."
+        else:
+            message = f"Status: {status}"
+
+        # WhatsApp bridge expects: {"to": "<number>", "message": "<text>"}
+        payload = {
+            "to": recipient,
+            "message": message,
+        }
+
+        httpx.post(
+            settings.whatsapp_callback_url,
+            json=payload,
+            timeout=10.0,
+        )
+        logger.info(f"WhatsApp notification sent to {recipient} for job {job.id}")
+    except Exception as e:
+        logger.error(f"Failed to send WhatsApp notification: {e}")
+
+
 @celery_app.task(bind=True, max_retries=3)
 def continue_vibe_task(self, job_id: str, user_response: str):
     """
-    Continue a vibe session with user input in the same working directory.
+    Continue a vibe task with user input.
+
+    Simplified version - just runs a new task with the response.
     """
+    logger.info(f"[Job {job_id}] Continuing with user response")
     job_service = get_job_service()
     settings = get_settings()
 
@@ -193,206 +246,98 @@ def continue_vibe_task(self, job_id: str, user_response: str):
     if not job:
         raise ValueError(f"Job {job_id} not found")
 
-    if not job.working_dir:
-        raise ValueError(f"Job {job_id} has no working directory")
-
-    worktree_path = job.working_dir
-
-    # Create wrapper with existing working directory
-    wrapper = VibeInteractiveWrapper(working_dir=worktree_path, max_turns=job.max_turns)
-
-    # Restore session history
-    wrapper.session_history = [
-        {
-            "turn": t.turn_number,
-            "prompt": t.prompt,
-            "output": t.output,
-            "success": t.success,
-        }
-        for t in job.turn_history
-    ]
-    wrapper.current_turn = job.current_turn
-
     try:
-        # Submit user response
+        # Update status
+        job_service.update_job_status(job_id, JobStatus.PROCESSING)
         job_service.submit_user_response(job_id, user_response)
 
-        # Continue the session
-        for result in wrapper.continue_task(user_response):
-            # Store turn result
-            turn_result = TurnResult(
-                turn_number=wrapper.current_turn,
-                prompt=f"[User]: {user_response}",
-                output=result.output,
-                success=result.success,
-                files_changed=result.files_changed,
-                timestamp=datetime.utcnow(),
+        # Build combined prompt
+        combined_prompt = (
+            f"Previous context: {job.prompt}\n\nUser response: {user_response}"
+        )
+
+        # Run vibe
+        result = run_vibe(
+            prompt=combined_prompt,
+            working_dir=job.working_dir,
+            max_turns=job.max_turns,
+        )
+
+        # Store result
+        turn_result = TurnResult(
+            turn_number=job.current_turn + 1,
+            prompt=user_response,
+            output=result.output,
+            success=result.success,
+            files_changed=result.files_changed,
+        )
+        job_service.add_turn_result(job_id, turn_result)
+
+        # Check for questions
+        question = _extract_question(result.output)
+        if question:
+            job_service.set_agent_question(job_id, question)
+            _notify_webhook(
+                job,
+                {
+                    "status": "needs_input",
+                    "question": question,
+                    "job_id": str(job_id),
+                },
             )
-            job_service.add_turn_result(job_id, turn_result)
+            return {"status": "waiting_for_input", "job_id": job_id}
 
-            # Add to conversation
-            if result.output:
-                job_service.add_conversation_message(job_id, "agent", result.output)
+        # Complete or fail
+        if result.success:
+            job_service.update_job_status(
+                job_id, JobStatus.COMPLETED, result=result.output
+            )
+            _notify_webhook(
+                job,
+                {
+                    "status": "completed",
+                    "result": result.output,
+                    "job_id": str(job_id),
+                },
+            )
+            return {"status": "completed", "job_id": job_id, "result": result.output}
+        else:
+            job_service.update_job_status(
+                job_id, JobStatus.FAILED, error_message=result.error or "Task failed"
+            )
+            _notify_webhook(
+                job,
+                {
+                    "status": "failed",
+                    "error": result.error or "Task failed",
+                    "job_id": str(job_id),
+                },
+            )
+            return {"status": "failed", "job_id": job_id, "error": result.error}
 
-            # Check if vibe is asking for more input
-            question = _extract_question(result.output)
-            if question:
-                job_service.set_agent_question(job_id, question)
-                _notify_webhook(
-                    job,
-                    {
-                        "status": "needs_input",
-                        "question": question,
-                        "job_id": str(job_id),
-                        "session_id": job.session_id,
-                        "working_dir": worktree_path,
-                        "current_turn": wrapper.current_turn,
-                    },
-                )
-                return {"status": "waiting_for_input", "job_id": job_id}
-
-            # If failed
-            if not result.success:
-                job_service.update_job_status(
-                    job_id,
-                    JobStatus.FAILED,
-                    error_message=result.error or "Task failed",
-                )
-                _notify_webhook(
-                    job,
-                    {
-                        "status": "failed",
-                        "error": result.error or "Task failed",
-                        "job_id": str(job_id),
-                    },
-                )
-                return {"status": "failed", "job_id": job_id}
-
-        # Session completed
-        final_output = (
-            wrapper.session_history[-1]["output"]
-            if wrapper.session_history
-            else "Task completed"
+    except SoftTimeLimitExceeded:
+        logger.error(f"[Job {job_id}] Task exceeded soft time limit")
+        job_service.update_job_status(
+            job_id,
+            JobStatus.TIMEOUT,
+            error_message="Task exceeded maximum execution time",
         )
-
-        job_service.update_job_status(job_id, JobStatus.COMPLETED, result=final_output)
-
-        _notify_webhook(
-            job,
-            {
-                "status": "completed",
-                "result": final_output,
-                "job_id": str(job_id),
-                "session_id": job.session_id,
-                "working_dir": worktree_path,
-                "branch": job.branch_name,
-                "total_turns": wrapper.current_turn,
-                "files_changed": _get_all_files_changed(job),
-            },
-        )
-
-        return {"status": "completed", "job_id": job_id}
+        _notify_webhook(job, {"status": "timeout", "job_id": str(job_id)})
+        raise
 
     except Exception as e:
+        logger.error(f"[Job {job_id}] Exception: {str(e)}")
+        logger.exception(f"[Job {job_id}] Full traceback:")
         if self.request.retries < settings.job_retry_count:
-            raise self.retry(
-                countdown=settings.job_retry_delay * (self.request.retries + 1)
+            retry_count = self.request.retries + 1
+            logger.info(
+                f"[Job {job_id}] Retrying ({retry_count}/{settings.job_retry_count})"
             )
+            raise self.retry(countdown=settings.job_retry_delay * retry_count)
 
+        logger.error(f"[Job {job_id}] All retries exhausted")
         job_service.update_job_status(job_id, JobStatus.FAILED, error_message=str(e))
         _notify_webhook(
             job, {"status": "failed", "error": str(e), "job_id": str(job_id)}
         )
         raise
-
-
-def _build_prompt(job) -> str:
-    """Build the full prompt with instructions to ask questions when needed."""
-    prompt_parts = []
-
-    if job.repo_url:
-        prompt_parts.append(f"Clone the repository from {job.repo_url}")
-        if job.branch_name:
-            prompt_parts.append(
-                f"Create and switch to a branch named '{job.branch_name}'"
-            )
-        prompt_parts.append("Then:")
-
-    prompt_parts.append(job.prompt)
-
-    # Add instructions about asking questions
-    prompt_parts.append(
-        "\n\nIMPORTANT: If my request is unclear or missing details, DO NOT proceed with assumptions."
-    )
-    prompt_parts.append(
-        "Instead, ask me specific questions to clarify what you should do."
-    )
-    prompt_parts.append(
-        "Start your response with 'QUESTION:' followed by what you need to know."
-    )
-
-    return "\n".join(prompt_parts)
-
-
-def _extract_question(output: str) -> str | None:
-    """Extract question from agent output. Looks for 'QUESTION:' prefix."""
-    if not output:
-        return None
-
-    match = re.search(r"QUESTION:\s*(.+?)(?:\n|$)", output, re.IGNORECASE | re.DOTALL)
-    if match:
-        return match.group(1).strip()
-
-    return None
-
-
-def _notify_webhook(job, payload: dict):
-    """
-    Send notification to WhatsApp send server.
-
-    Translates internal job payloads into {to, message} format
-    expected by the WhatsApp bridge's POST /send endpoint.
-    """
-    if not job.webhook_url:
-        return
-
-    # Extract the sender from the session_id (format: "whatsapp-{sender}")
-    sender = None
-    if job.session_id and job.session_id.startswith("whatsapp-"):
-        sender = job.session_id[len("whatsapp-") :]
-
-    if not sender:
-        return
-
-    # Build the message text based on status
-    status = payload.get("status")
-    if status == "needs_input":
-        message = f"Question: {payload.get('question', '')}"
-    elif status == "completed":
-        result = payload.get("result", "Task completed.")
-        message = f"Done! {result[:1000]}"
-    elif status == "failed":
-        message = (
-            f"Sorry, something went wrong: {payload.get('error', 'Unknown error')}"
-        )
-    elif status == "timeout":
-        message = "Sorry, the task timed out. Please try again."
-    else:
-        return
-
-    try:
-        httpx.post(
-            job.webhook_url,
-            json={"to": sender, "message": message},
-            timeout=10.0,
-        )
-    except Exception:
-        pass
-
-
-def _get_all_files_changed(job) -> list[str]:
-    """Get all files changed across all turns."""
-    files = set()
-    for turn in job.turn_history:
-        files.update(turn.files_changed)
-    return list(files)

@@ -51,6 +51,28 @@ class JobService:
         # Store with long TTL (30 days)
         self.redis.setex(key, 2592000, working_dir)
 
+    def _get_active_job_key(self, sender: str) -> str:
+        """Generate Redis key for user's active job."""
+        return f"active_job:{sender}"
+
+    def get_active_job(self, sender: str) -> Job | None:
+        """Get the active job for a user (the one we keep updating)."""
+        key = self._get_active_job_key(sender)
+        job_id = self.redis.get(key)
+        if job_id:
+            return self.get_job(job_id)
+        return None
+
+    def set_active_job(self, sender: str, job_id: str | UUID) -> None:
+        """Set the active job for a user."""
+        key = self._get_active_job_key(sender)
+        self.redis.setex(key, self.settings.redis_job_ttl, str(job_id))
+
+    def clear_active_job(self, sender: str) -> None:
+        """Clear the active job for a user (when starting new project)."""
+        key = self._get_active_job_key(sender)
+        self.redis.delete(key)
+
     def create_job(
         self,
         prompt: str,

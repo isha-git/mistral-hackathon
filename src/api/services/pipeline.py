@@ -9,6 +9,7 @@ from typing import Optional
 
 from src.api.models.job import IncomingMessage, Reply, JobStatus
 from src.api.services.job_service import get_job_service
+from src.api.services.elevenlabs.stt import transcribe
 from src.api.config.settings import get_settings
 from src.api.tasks.jobs import run_vibe_task
 
@@ -22,10 +23,19 @@ async def process_message(msg: IncomingMessage) -> Reply:
     - All messages go to same working directory
     - Send "/new_project" to start fresh
     """
-    if not msg.type == "text" or not msg.text:
-        return Reply(type="text", text="I only understand text messages for now.")
-
-    prompt = msg.text.strip()
+    if msg.type == "audio" and msg.media_base64:
+        try:
+            transcribed = await transcribe(msg.media_base64)
+            prompt = transcribed.strip()
+            if not prompt:
+                return Reply(type="text", text="I couldn't understand the audio. Could you try again?")
+        except Exception as e:
+            print(f"[pipeline] STT failed: {e}")
+            return Reply(type="text", text=f"Failed to transcribe audio: {e}")
+    elif msg.type == "text" and msg.text:
+        prompt = msg.text.strip()
+    else:
+        return Reply(type="text", text="I only understand text and voice messages for now.")
     sender = msg.sender
 
     # Check for new project command

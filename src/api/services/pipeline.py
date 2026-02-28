@@ -1,18 +1,13 @@
 """
 Pipeline for processing WhatsApp messages and routing to Vibe jobs.
 
-Flow:
-  1. WhatsApp message arrives at /webhook
-  2. Text/audio routed here, job created with callback URL
-  3. Celery runs Vibe agent async
-  4. If agent asks question → POST callback_url → WhatsApp service → user
-  5. User replies → WhatsApp service → POST /tasks/{id}/continue
-  6. Agent continues → completion → POST callback_url → user
+Simple model: One active job per user (sender), all messages go to same working directory.
+Send "/new_project" to start fresh.
 """
 
 from typing import Optional
 
-from src.api.models.job import IncomingMessage, Reply
+from src.api.models.job import IncomingMessage, Reply, JobStatus
 from src.api.services.job_service import get_job_service
 from src.api.config.settings import get_settings
 from src.api.tasks.jobs import run_vibe_task
@@ -20,65 +15,83 @@ from src.api.tasks.jobs import run_vibe_task
 
 async def process_message(msg: IncomingMessage) -> Reply:
     """
-    Process incoming WhatsApp message and create Vibe job.
+    Process incoming WhatsApp message.
 
-    Pipeline:
-      text  → Create Vibe job directly
-      audio → Transcribe via ElevenLabs, then create job
-      image → Future
+    Simple model:
+    - One job per user (sender) tracked via active_job:<sender> in Redis
+    - All messages go to same working directory
+    - Send "/new_project" to start fresh
     """
-    if msg.type == "text" and msg.text:
-        return await _create_vibe_job(prompt=msg.text, sender=msg.sender)
+    if not msg.type == "text" or not msg.text:
+        return Reply(type="text", text="I only understand text messages for now.")
 
-    elif msg.type == "audio" and msg.media_base64:
-        try:
-            from src.api.services.elevenlabs import stt
+    prompt = msg.text.strip()
+    sender = msg.sender
 
-            transcribed = await stt.transcribe(msg.media_base64)
-            return await _create_vibe_job(prompt=transcribed, sender=msg.sender)
-        except ImportError:
-            return Reply(
-                type="text",
-                text="Audio transcription not available. Please send your request as text.",
-            )
+    # Check for new project command
+    if prompt.lower() == "/new_project":
+        return await _start_new_project(sender)
 
-    elif msg.type == "image":
-        return Reply(
-            type="text",
-            text="Image processing coming soon. Please send your request as text for now.",
-        )
+    # Otherwise, add to existing project
+    return await _add_to_project(prompt=prompt, sender=sender)
+
+
+async def _start_new_project(sender: str) -> Reply:
+    """Start a new project (clears old working directory reference)."""
+    job_service = get_job_service()
+    settings = get_settings()
+
+    # Clear the active job reference
+    job_service.clear_active_job(sender)
+
+    print(f"[pipeline] New project for {sender}")
 
     return Reply(
-        type="text", text="I didn't understand that. Please send text or audio."
+        type="text",
+        text="🆕 New project started!\n\n"
+        "What would you like to build?\n\n"
+        "Working directory will be reused for all your messages.",
     )
 
 
-async def _create_vibe_job(
-    prompt: str,
-    sender: str,
-    repo_url: Optional[str] = None,
-    branch_name: Optional[str] = None,
-) -> Reply:
-    """
-    Create a Vibe job with the WhatsApp callback URL so the agent can
-    send questions and results back to the user.
-    """
-    settings = get_settings()
+async def _add_to_project(prompt: str, sender: str) -> Reply:
+    """Add a task to the user's existing project."""
     job_service = get_job_service()
+    settings = get_settings()
 
-    # whatsapp_callback_url is where Celery will POST when:
-    # - agent has a question (status: needs_input)
-    # - job completes (status: completed)
-    # - job fails (status: failed)
-    # The WhatsApp service at that URL then forwards to the user.
-    job = job_service.create_job(
-        prompt=prompt,
-        session_id=f"whatsapp-{sender}",
-        repo_url=repo_url,
-        branch_name=branch_name or f"whatsapp-{sender[:8]}",
-        webhook_url=settings.whatsapp_callback_url,
-        max_turns=50,
-    )
+    # Check if there's an active job for this user
+    existing_job = job_service.get_active_job(sender)
+
+    if existing_job and existing_job.status == JobStatus.WAITING_FOR_INPUT:
+        # User is responding to a question
+        print(f"[pipeline] Job for {sender} waiting for input, treating as new task")
+
+    if not existing_job:
+        # First time user - create initial job in host-accessible directory
+        working_dir = (
+            f"/app/vibe_repos/user-{sender.replace('@', '_').replace(':', '_')[:50]}"
+        )
+        job = job_service.create_job(
+            prompt=prompt,
+            session_id=f"whatsapp-{sender}",
+            branch_name=f"user-{sender[:8]}",
+            webhook_url=settings.whatsapp_callback_url,
+            max_turns=50,
+            working_dir=working_dir,
+        )
+        # Add user's message to conversation
+        job_service.add_conversation_message(job.id, "user", prompt)
+        # Set as active job
+        job_service.set_active_job(sender, job.id)
+        print(f"[pipeline] First project for {sender}: {job.id}")
+    else:
+        # Reuse existing job - update prompt, reset status, add message
+        existing_job.prompt = prompt
+        existing_job.status = JobStatus.PENDING
+        job_service.add_conversation_message(existing_job.id, "user", prompt)
+        job_service.save_job(existing_job)
+        job = existing_job
+        print(f"[pipeline] Reusing project for {sender}: {job.id}")
 
     run_vibe_task.delay(str(job.id))
 
@@ -86,5 +99,6 @@ async def _create_vibe_job(
         type="text",
         text=f"Got it! Working on: {prompt[:50]}{'...' if len(prompt) > 50 else ''}\n\n"
         f"Job ID: `{job.id}`\n"
-        f"I'll message you when done or if I need anything.",
+        f"Working dir: `{job.working_dir}`\n"
+        "I'll message you when done or if I need anything.",
     )

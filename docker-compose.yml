@@ -55,8 +55,8 @@ services:
     volumes:
       # Persist Vibe sessions (conversation history)
       - vibe_sessions:/app/.vibe
-      # Persist working directories (user code)
-      - vibe_repos:/app/vibe_repos
+      # Bind mount working directories for host access
+      - ./vibe_repos:/app/vibe_repos
     depends_on:
       redis:
         condition: service_healthy
@@ -81,15 +81,19 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     command: celery -A src.api.config.celery worker --loglevel=info --concurrency=2
+    tty: true
+    stdin_open: true
     environment:
       - REDIS_URL=redis://redis:6379/0
       - VIBE_HOME=/app/.vibe
+      - MISTRAL_API_KEY=${MISTRAL_VIBE_API_KEY}
     env_file:
       - .env
     volumes:
       # Same volumes as API - worker needs access to sessions and repos
       - vibe_sessions:/app/.vibe
-      - vibe_repos:/app/vibe_repos
+      # Bind mount working directories for host access
+      - ./vibe_repos:/app/vibe_repos
     depends_on:
       redis:
         condition: service_healthy
@@ -105,8 +109,9 @@ volumes:
   whatsapp-auth:
   vibe_sessions:
     # Vibe CLI session data (conversation history, config)
-  vibe_repos:
-    # Working directories where Vibe agents create/modify code
+
+# Bind mounts for host-accessible directories
+# vibe_repos is mapped to ./vibe_repos on host
 
 networks:
   app-network:

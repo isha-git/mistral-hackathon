@@ -25,15 +25,8 @@ RUN mkdir -p /app/vibe_repos /app/.vibe
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 
-# Switch to appuser for tool installation
-USER appuser
-
-# Install Vibe CLI as appuser (tools go to /home/appuser/.local/bin)
-RUN uv tool install mistral-vibe
-
 # Set environment variables
 ENV VIBE_HOME=/app/.vibe
-ENV PATH="/home/appuser/.local/bin:/home/appuser/.cargo/bin:${PATH}"
 
 # Expose port
 EXPOSE 8000

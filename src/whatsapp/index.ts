@@ -89,6 +89,16 @@ async function main(): Promise<void> {
       const parsed = await parseMessage(msg, sock);
       if (!parsed) continue;
 
+      // Skip our own responses (echoed messages)
+      if (parsed.text && (
+        parsed.text.includes("Got it! Working on:") ||
+        parsed.text.includes("Job ID:") ||
+        parsed.text.includes("I'll message you when done")
+      )) {
+        console.log(`[skip] Ignoring echoed bot message from ${parsed.from}`);
+        continue;
+      }
+
       console.log(`[in] ${parsed.type} from ${parsed.from}: ${parsed.text ?? "(media)"}`);
 
       try {

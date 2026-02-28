@@ -1,4 +1,6 @@
+import logging
 from celery import Celery
+from celery.signals import setup_logging
 from src.api.config.settings import get_settings
 
 
@@ -31,6 +33,15 @@ def create_celery_app() -> Celery:
     )
 
     return celery_app
+
+
+@setup_logging.connect
+def setup_celery_logging(**kwargs):
+    """Configure logging for Celery workers."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
 
 
 # Create the Celery app instance

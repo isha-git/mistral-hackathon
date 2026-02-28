@@ -19,6 +19,23 @@ services:
     networks:
       - app-network
 
+  whatsapp:
+    build:
+      context: ./src/whatsapp
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:3001"
+    environment:
+      - API_URL=http://api:8000
+      - SEND_PORT=3001
+    volumes:
+      - whatsapp-auth:/app/.auth
+    depends_on:
+      - api
+    networks:
+      - app-network
+
   api:
     build:
       context: .
@@ -31,6 +48,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - HOST=0.0.0.0
       - PORT=8000
+      - WHATSAPP_CALLBACK_URL=http://whatsapp:3001/send
     env_file:
       - .env
     depends_on:
@@ -71,6 +89,7 @@ services:
 
 volumes:
   redis_data:
+  whatsapp-auth:
 
 networks:
   app-network:

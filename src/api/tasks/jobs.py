@@ -347,14 +347,43 @@ def _extract_question(output: str) -> str | None:
 
 
 def _notify_webhook(job, payload: dict):
-    """Send notification to configured webhook URL."""
+    """
+    Send notification to WhatsApp send server.
+
+    Translates internal job payloads into {to, message} format
+    expected by the WhatsApp bridge's POST /send endpoint.
+    """
     if not job.webhook_url:
+        return
+
+    # Extract the sender from the session_id (format: "whatsapp-{sender}")
+    sender = None
+    if job.session_id and job.session_id.startswith("whatsapp-"):
+        sender = job.session_id[len("whatsapp-") :]
+
+    if not sender:
+        return
+
+    # Build the message text based on status
+    status = payload.get("status")
+    if status == "needs_input":
+        message = f"Question: {payload.get('question', '')}"
+    elif status == "completed":
+        result = payload.get("result", "Task completed.")
+        message = f"Done! {result[:1000]}"
+    elif status == "failed":
+        message = (
+            f"Sorry, something went wrong: {payload.get('error', 'Unknown error')}"
+        )
+    elif status == "timeout":
+        message = "Sorry, the task timed out. Please try again."
+    else:
         return
 
     try:
         httpx.post(
             job.webhook_url,
-            json=payload,
+            json={"to": sender, "message": message},
             timeout=10.0,
         )
     except Exception:

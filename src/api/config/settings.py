@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     job_retry_count: int = 3
     job_retry_delay: int = 5  # seconds
 
+    # WhatsApp callback - where to send agent questions/completions back to the user
+    whatsapp_callback_url: str | None = None
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

@@ -1,6 +1,8 @@
 from uuid import UUID
 from datetime import datetime
+import json
 import re
+import time
 
 from src.api.config.redis import get_redis_client
 from src.api.config.settings import get_settings
@@ -282,6 +284,23 @@ class JobService:
         job_key = self._get_job_key(job_id)
         result = self.redis.delete(job_key)
         return result > 0
+
+    def publish_progress(self, job_id: str, data: dict) -> None:
+        """Store event in Redis list (backlog) and publish to pub/sub (live)."""
+        data.setdefault("timestamp", time.time())
+        payload = json.dumps(data, default=str)
+        key = f"progress:{job_id}"
+        self.redis.rpush(key, payload)
+        self.redis.expire(key, self.settings.redis_job_ttl)
+        self.redis.publish(key, payload)
+
+    def get_progress_events(self, job_id: str) -> list[str]:
+        """Return all stored progress events (backlog replay)."""
+        return self.redis.lrange(f"progress:{job_id}", 0, -1)
+
+    def clear_progress_events(self, job_id: str) -> None:
+        """Delete stored progress events (used when reusing a job)."""
+        self.redis.delete(f"progress:{job_id}")
 
 
 def get_job_service() -> JobService:

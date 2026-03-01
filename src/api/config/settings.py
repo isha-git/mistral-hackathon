@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     # WhatsApp callback - where to send agent questions/completions back to the user
     whatsapp_callback_url: str | None = None
 
+    # GitHub token for git operations (clone private repos, create PRs)
+    github_token: str | None = None
+
+    # Public base URL for progress page links (set to your Digital Ocean domain in prod)
+    base_url: str = "http://localhost:8000"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

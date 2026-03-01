@@ -14,6 +14,7 @@ dependencies = [
     "httpx>=0.28.0",
     "python-multipart>=0.0.20",
     "ruff>=0.15.4",
+    "elevenlabs>=1.0.0",
     "mistral-vibe>=2.3.0",
 ]
 

@@ -1,6 +1,6 @@
 import base64
 
-from api.services.elevenlabs.client import get_client
+from src.api.services.elevenlabs.client import get_client
 
 
 async def transcribe(audio_base64: str, language_code: str = "eng") -> str:

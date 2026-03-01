@@ -25,6 +25,10 @@ RUN mkdir -p /app/vibe_repos /app/.vibe
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 
+# Configure git identity for agent auto-commits (safe_write_file)
+RUN git config --global user.name "Bunny Bot" && \
+    git config --global user.email "bunny@bot.local"
+
 # Set environment variables
 ENV VIBE_HOME=/app/.vibe
 

@@ -80,13 +80,22 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    command: celery -A src.api.config.celery worker --loglevel=info --concurrency=2
+    command: >
+      sh -c "mkdir -p /app/vibe_repos &&
+             if [ -n \"$$GITHUB_BOT_USERNAME\" ]; then
+               git config --global user.name \"$$GITHUB_BOT_USERNAME\" &&
+               git config --global user.email \"$$GITHUB_BOT_USERNAME@users.noreply.github.com\";
+             fi &&
+             celery -A src.api.config.celery worker --loglevel=info --concurrency=2"
     tty: true
     stdin_open: true
     environment:
       - REDIS_URL=redis://redis:6379/0
       - VIBE_HOME=/app/.vibe
       - MISTRAL_API_KEY=${MISTRAL_VIBE_API_KEY}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_BOT_TOKEN=${GITHUB_BOT_TOKEN}
+      - GITHUB_BOT_USERNAME=${GITHUB_BOT_USERNAME}
     env_file:
       - .env
     volumes:

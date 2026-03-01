@@ -6,6 +6,7 @@ Send "/new_project" to start fresh.
 """
 
 import os
+import shutil
 from typing import Optional
 
 import httpx
@@ -87,20 +88,26 @@ async def process_message(msg: IncomingMessage) -> Reply:
 
 
 async def _start_new_project(sender: str) -> Reply:
-    """Start a new project (clears old working directory reference)."""
+    """Start a new project (clears old job, working directory, and session history)."""
     job_service = get_job_service()
     settings = get_settings()
 
     # Clear the active job reference
     job_service.clear_active_job(sender)
 
+    # Delete the user's working directory so the agent starts fresh
+    safe_sender = sender.replace("@", "_").replace(":", "_")[:50]
+    working_dir = f"/app/vibe_repos/user-{safe_sender}"
+    if os.path.isdir(working_dir):
+        shutil.rmtree(working_dir, ignore_errors=True)
+        print(f"[pipeline] Deleted working directory: {working_dir}")
+
     print(f"[pipeline] New project for {sender}")
 
     return Reply(
         type="text",
         text="🆕 New project started!\n\n"
-        "What would you like to build?\n\n"
-        "Working directory will be reused for all your messages.",
+        "What would you like to build?\n\n",
     )
 
 
@@ -160,18 +167,27 @@ async def _add_to_project(prompt: str, sender: str) -> Reply:
         print(f"[pipeline] Reusing project for {sender}: {job.id}")
 
     display = _summarise_prompt(prompt)
+    progress_url = f"{settings.base_url}/jobs/{job.id}"
+
+    # Send the progress link as a separate WhatsApp message so it's easy to copy
+    if settings.whatsapp_callback_url:
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    settings.whatsapp_callback_url,
+                    json={"to": sender, "message": progress_url},
+                    timeout=5.0,
+                )
+        except Exception as e:
+            print(f"[pipeline] Failed to send progress link: {e}")
 
     if existing_job and existing_job.status == JobStatus.WAITING_FOR_INPUT:
         return Reply(
             type="text",
-            text=f"🎙️ {display}\n\n"
-                 f"Track progress: {settings.base_url}/jobs/{job.id}\n\n"
-                 "Continuing with your response...",
+            text=f"🎙️ {display}\n\nContinuing with your response...",
         )
 
     return Reply(
         type="text",
-        text=f"🎙️ {display}\n\n"
-             f"Track progress: {settings.base_url}/jobs/{job.id}\n\n"
-             "I'll message you when done or if I need anything.",
+        text=f"🎙️ {display}\n\nI'll message you when done or if I need anything.",
     )

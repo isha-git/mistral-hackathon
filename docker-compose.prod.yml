@@ -1,0 +1,30 @@
+# Production overlay — run with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - api
+    networks:
+      - app-network
+
+  api:
+    # Override: remove localhost-only binding; Caddy handles external access
+    ports: !reset []
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - HOST=0.0.0.0
+      - PORT=8000
+      - WHATSAPP_CALLBACK_URL=http://whatsapp:3001/send
+      - VIBE_HOME=/app/.vibe
+      - BASE_URL=http://${DROPLET_IP:-localhost}
+
+  whatsapp:
+    # Override: remove localhost-only binding; only needs internal network
+    ports: !reset []

@@ -1,13 +1,14 @@
 # WhatsApp + Mistral Vibe Coding Agent
 
-A WhatsApp bridge that lets you chat with Mistral Vibe to write code. All projects persist on your local filesystem.
+VibeBunny lets you manage Mistral Vibe through the cloud, given it's own github account it can make PRs, leave comments on PRs and contribute to your codebases.
+The idea is that this can run on a homelab (or cloud) to help you code. Long running agents that can help you maintain, contribute or review the repos you add it to. You control it through whatsapp, voice or text whichever you prefer. It uses ElevenLabs for speech-to-text, Mistral API for LLMs and Mistral Vibe for coding agents harness.
 
 ## How It Works
 
 **One WhatsApp number = One persistent coding project**
 
 - Send any message → Vibe creates/modifies code in your project
-- Files saved to `./vibe_repos/` (visible on your host machine)
+- Files saved to `./vibe_repos/`
 - Session history tracked automatically via vibe's sessions
 - Type `/new_project` to start fresh
 
@@ -21,7 +22,7 @@ cp .env.example .env
 # 2. Start everything
 docker compose up --build
 
-# 3. Scan QR code with bot's phone
+# 3. Scan QR code with whatsapp phone number you'd like to use
 # WhatsApp > Settings > Linked Devices > Link a Device
 ```
 
@@ -50,7 +51,7 @@ vibe_repos/
             └── meta.json         # Session metadata
 ```
 
-**Files are visible on your host machine** at `./vibe_repos/`
+**For local inspection you can check what the agent produces** at `./vibe_repos/`
 
 ## Session Continuity
 
@@ -64,44 +65,41 @@ We follow vibe's session design:
 ## Architecture
 
 ```
-┌─────────────┐     WhatsApp      ┌─────────────┐
-│   Your      │ ────────────────> │  WhatsApp   │
-│   Phone     │                   │   Bridge    │
-│             │ <──────────────── │   (Node)    │
-└─────────────┘     Response      └──────┬──────┘
-                                         │
-                                         │ HTTP
-                                         │
-                              ┌──────────▼──────────┐
-                              │       API           │
-                              │    (FastAPI)        │
-                              │                     │
-                              │ ┌─────────────────┐ │
-                              │ │  Pipeline:      │ │
-                              │ │ One job/user    │ │
-                              │ │ Reuse working   │ │
-                              │ │ dir across msgs │ │
-                              │ └─────────────────┘ │
-                              └──────────┬──────────┘
-                                         │
-                              ┌──────────▼──────────┐
-                              │      Worker         │
-                              │    (Celery)         │
-                              │                     │
-                              │ Load session msgs   │
-                              │ from vibe's files   │
-                              │                     │
-                              │ Run via direct      │
-                              │ Python API          │
-                              │ (no subprocess)     │
-                              └──────────┬──────────┘
-                                         │
-                              ┌──────────▼──────────┐
-                              │   vibe_repos/       │
-                              │   (bind mount)      │
-                              │   Host filesystem   │
-                              └─────────────────────┘
+                              Docker Compose
+                 ┌──────────────────────────────────────────┐
+                 │                                          │
+ ┌───────────┐   │  ┌──────────┐  POST /webhook  ┌───────┐  │
+ │  User's   │───┼─>│ WhatsApp │ ──────────────> │  API  │  │
+ │  Phone    │   │  │  Bridge  │                 │(Fast- │  │
+ │ (WhatsApp)│<──┼──│  (Node)  │ <────────────── │ API)  │  │
+ └───────────┘   │  └──────────┘   webhook/ack   └───┬───┘  │
+                 │                                    │      │
+                 │                              enqueue job  │
+                 │                                    │      │
+                 │                                    ▼      │
+                 │  ┌──────────┐               ┌──────────┐  │
+                 │  │  Redis   │<──────────────│  Celery   │  │
+                 │  │  (state) │               │  Worker   │  │
+                 │  └──────────┘               └────┬─────┘  │
+                 │                                  │        │
+                 └──────────────────────────────────┼────────┘
+                                                    │
+                                          runs: vibe (package, not cli)
+                                                    │
+                                                    ▼
+                                             ┌─────────────┐
+                                             │ Mistral Vibe │
+                                             │   CLI        │
+                                             │              │
+                                             │ • clones repo│
+                                             │ • writes code│
+                                             │ • commits    │
+                                             │ • pushes     │
+                                             │ • creates PR │
+                                             └─────────────┘
 ```
+
+The bridge receives WhatsApp messages via a persistent connection and forwards them to the API over HTTP. Celery workers run Mistral Vibe to execute coding tasks asynchronously.
 
 ## Testing
 
@@ -126,10 +124,8 @@ curl http://localhost:8000/tasks/<job_id> \
 ## Key Features
 
 ✅ **Persistent Projects** - One WhatsApp number = one project  
-✅ **Host Access** - Files saved to `./vibe_repos/` on your machine  
 ✅ **Session Continuity** - Vibe sees full conversation history  
 ✅ **Git Integration** - Each working dir is a git repo  
-✅ **No Subprocess** - Uses vibe's direct Python API  
 
 ## Logs
 
@@ -164,7 +160,36 @@ docker compose up --build
 ## Implementation Notes
 
 - Uses `vibe.core.programmatic.run_programmatic()` for non-interactive execution
-- Loads previous messages from `sessions/session_*/messages.jsonl`
+- Loads previous messages from `sessions/session_*/messages.jsonl`, sticking to vibe its implementation
 - Working directory determined by sender ID: `vibe_repos/user-<sender>/`
 - Celery handles async job processing
 - Redis for job queue and state persistence
+
+## Project Structure
+
+```
+docker-compose.yml          — orchestrates all services
+
+src/whatsapp/               — WhatsApp bridge (Node/TypeScript)
+  index.ts                  — entry point, wires socket + message loop
+  connection.ts             — Baileys socket, QR display, credential persistence
+  message.ts                — parses incoming messages into structured format
+  media.ts                  — download/send media (audio, images, text)
+  handler.ts                — forwards messages to the API, parses replies
+  Dockerfile
+
+src/api/                    — API service (Python/FastAPI)
+  main.py                   — FastAPI app, mounts routes
+  models.py                 — request/response schemas (Pydantic)
+  routes/
+    webhook.py              — POST /webhook — receives messages, returns replies
+    health.py               — GET /health
+  services/
+    pipeline.py             — orchestrates: STT → Mistral (later) → TTS (later)
+    elevenlabs/
+      client.py             — shared ElevenLabs API client
+      stt.py                — speech-to-text (voice → text)
+      tts.py                — text-to-speech (placeholder)
+  Dockerfile
+```
+

@@ -1,11 +1,13 @@
 import logging
+import time
+
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import time
-from collections import defaultdict
 
 from src.api.config.settings import get_settings
+from src.api.config.redis import get_redis_client
+from src.api.exceptions import AppError
 from src.api.routes import tasks, health, webhook
 
 # Configure logging
@@ -13,6 +15,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -29,35 +32,34 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"]
     if settings.debug
-    else [],
+    else settings.cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
-    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-Webhook-Secret"],
 )
-
-# Simple rate limiting middleware
-request_counts = defaultdict(list)
 
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    """Simple rate limiting - 30 requests per minute per IP."""
+    """Rate limiting using Redis sliding window."""
     client_ip = request.client.host
+    key = f"ratelimit:{client_ip}"
     now = time.time()
 
-    # Clean old requests
-    request_counts[client_ip] = [
-        req_time for req_time in request_counts[client_ip] if now - req_time < 60
-    ]
+    redis_client = get_redis_client()
+    pipe = redis_client.pipeline()
+    pipe.zremrangebyscore(key, 0, now - 60)
+    pipe.zadd(key, {str(now): now})
+    pipe.zcard(key)
+    pipe.expire(key, 60)
+    _, _, count, _ = pipe.execute()
 
-    # Check limit (30 requests per minute)
-    if len(request_counts[client_ip]) >= 30:
+    if count > settings.rate_limit_per_minute:
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             content={"detail": "Rate limit exceeded. Try again in a minute."},
         )
 
-    request_counts[client_ip].append(now)
     return await call_next(request)
 
 
@@ -71,9 +73,18 @@ async def add_request_timing(request: Request, call_next):
     return response
 
 
-# Exception handler
+# Exception handlers
+@app.exception_handler(AppError)
+async def app_error_handler(request: Request, exc: AppError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "type": type(exc).__name__},
+    )
+
+
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
+    logger.exception(f"Unhandled exception on {request.method} {request.url.path}")
     return JSONResponse(
         status_code=500,
         content={"detail": "Internal server error", "type": type(exc).__name__},

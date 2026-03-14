@@ -34,7 +34,7 @@ async function sendReply(sock: WASocket, jid: string, reply: Reply): Promise<voi
  *   "message": "Agent question or result text"
  * }
  */
-function startSendServer(sock: WASocket): void {
+function startSendServer(sock: WASocket): http.Server {
   const server = http.createServer(async (req, res) => {
     if (req.method !== "POST" || (req.url !== "/send" && req.url !== "/send-document")) {
       res.writeHead(404);
@@ -97,6 +97,8 @@ function startSendServer(sock: WASocket): void {
   server.listen(SEND_PORT, () => {
     console.log(`[send-server] listening on port ${SEND_PORT}`);
   });
+
+  return server;
 }
 
 async function main(): Promise<void> {
@@ -106,7 +108,7 @@ async function main(): Promise<void> {
   await waitForConnection(sock);
 
   // Start HTTP server so Celery can push messages back to users
-  startSendServer(sock);
+  const server = startSendServer(sock);
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
@@ -141,6 +143,26 @@ async function main(): Promise<void> {
       }
     }
   });
+
+  // Graceful shutdown — close HTTP server and WhatsApp socket cleanly
+  // so Docker stop / compose down doesn't cause "logged out" errors on reconnect
+  function shutdown(signal: string): void {
+    console.log(`\n${signal} received, shutting down...`);
+    server.close(() => {
+      console.log("[send-server] closed");
+      sock.end(undefined);
+      console.log("[whatsapp] socket closed");
+      process.exit(0);
+    });
+    // Force exit if graceful close takes too long
+    setTimeout(() => {
+      console.error("Shutdown timed out, forcing exit");
+      process.exit(1);
+    }, 10_000);
+  }
+
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 
   console.log("Bridge is running. Press Ctrl+C to stop.");
 }

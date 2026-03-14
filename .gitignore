@@ -28,4 +28,8 @@ ENV/
 *.log
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 vibe_repos/
+.auth/
+node_modules/
+dist/

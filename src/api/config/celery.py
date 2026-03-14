@@ -30,6 +30,12 @@ def create_celery_app() -> Celery:
         task_acks_late=True,
         task_reject_on_worker_lost=True,
         result_expires=settings.redis_job_ttl,
+        beat_schedule={
+            "recover-stale-jobs": {
+                "task": "src.api.tasks.jobs.recover_stale_jobs",
+                "schedule": 300.0,  # every 5 minutes
+            },
+        },
     )
 
     return celery_app

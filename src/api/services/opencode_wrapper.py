@@ -75,13 +75,20 @@ def send_prompt(session_id: str, prompt: str) -> AgentResult:
 
     try:
         # Send prompt (async — returns immediately, agent starts working)
+        # Use connect=10s so we detect stuck sessions quickly,
+        # but allow the full timeout for the LLM to finish generating.
         prompt_response = httpx.post(
             f"{base_url}/session/{session_id}/message",
             json={
                 "parts": [{"type": "text", "text": prompt}],
             },
             auth=auth,
-            timeout=settings.opencode_timeout,
+            timeout=httpx.Timeout(
+                connect=10.0,
+                read=120.0,
+                write=10.0,
+                pool=10.0,
+            ),
         )
         prompt_response.raise_for_status()
 
@@ -179,7 +186,9 @@ def run_opencode_task(
 
         # If the existing session failed (e.g. stale after restart), retry with a fresh one
         if not result.success and session_id:
-            logger.warning(f"Session {session_id} failed, creating fresh session and retrying")
+            logger.warning(
+                f"Session {session_id} failed, creating fresh session and retrying"
+            )
             session_id = create_session()
             result = send_prompt(session_id, prompt)
 

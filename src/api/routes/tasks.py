@@ -21,6 +21,17 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 security = HTTPBearer(auto_error=False)
 
 
+def _resolve_working_dir(job_create: JobCreate, job_service: JobService) -> str | None:
+    """Resolve working directory from request, falling back to repo/branch lookup."""
+    if job_create.working_dir:
+        return job_create.working_dir
+    if job_create.repo_url and job_create.branch_name:
+        return job_service.find_working_dir_for_repo_branch(
+            job_create.repo_url, job_create.branch_name
+        )
+    return None
+
+
 def job_to_response(job: Job) -> JobResponse:
     """Convert a Job model to a JobResponse."""
     return JobResponse(
@@ -92,17 +103,7 @@ async def create_task(
     - Pass working_dir to continue in existing directory
     - Or pass repo_url + branch_name for persistent repo directory
     """
-    # Check if we should reuse existing working directory
-    working_dir = job_create.working_dir
-    if not working_dir and job_create.repo_url and job_create.branch_name:
-        # Try to find existing working directory for this repo/branch
-        existing_dir = job_service.find_working_dir_for_repo_branch(
-            job_create.repo_url, job_create.branch_name
-        )
-        if existing_dir:
-            working_dir = existing_dir
-
-    # Create job
+    working_dir = _resolve_working_dir(job_create, job_service)
     job = job_service.create_job(
         prompt=job_create.prompt,
         session_id=job_create.session_id,
@@ -112,10 +113,7 @@ async def create_task(
         webhook_url=job_create.webhook_url,
         max_turns=job_create.max_turns,
     )
-
-    # Queue Celery task
     run_coding_task.delay(str(job.id))
-
     return job_to_response(job)
 
 

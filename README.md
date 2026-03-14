@@ -1,7 +1,8 @@
-# WhatsApp + OpenCode Coding Agent
+# VibeBunny
 
-A WhatsApp bridge that lets you chat with OpenCode to write code. All projects persist on your local filesystem.
-The idea is that this can run on a homelab at home to help you code. Long running agents that can help you maintain, contribute or review the repos you add it to. You control it through whatsapp, voice or text whichever you prefer. It uses ElevenLabs for speech-to-text and OpenCode for coding agents.
+A WhatsApp bridge that lets you chat with [OpenCode](https://opencode.ai) to write code. Send a message, get working code back — all projects persist on your local filesystem.
+
+Designed to run on a homelab. Long-running coding agents you control through WhatsApp, voice or text. Uses OpenCode for coding agents with any LLM provider.
 
 ## How It Works
 
@@ -14,17 +15,32 @@ The idea is that this can run on a homelab at home to help you code. Long runnin
 
 ## Quick Start
 
-```bash
-# 1. Set up environment
-cp .env.example .env
-# Edit .env and add your OPENCODE_PROVIDER_ID, OPENCODE_MODEL_ID, and provider API keys
+### Prerequisites
 
-# 2. Start everything
+- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/)
+- A WhatsApp account for the bot (separate from your personal account)
+- An API key for your chosen LLM provider (Anthropic, OpenAI, OpenRouter, etc.)
+
+### Setup
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/isha-git/VibeBunny.git
+cd VibeBunny
+
+# 2. Configure environment
+cp .env.example .env
+# Edit .env — set API_KEY, WEBHOOK_SECRET, your LLM provider key,
+# and OPENCODE_PROVIDER_ID / OPENCODE_MODEL_ID
+
+# 3. Start all services
 docker compose up --build
 
-# 3. Scan QR code with bot's phone
-# WhatsApp > Settings > Linked Devices > Link a Device
+# 4. Scan the QR code that appears in the terminal
+# On the bot's phone: WhatsApp > Settings > Linked Devices > Link a Device
 ```
+
+Once linked, send a message from your personal WhatsApp to the bot's number and start coding.
 
 ## Usage
 
@@ -32,31 +48,10 @@ Send messages from **your personal WhatsApp** to the bot's number:
 
 | Message | What Happens |
 |---------|--------------|
-| `create a fastapi app` | OpenCode creates `main.py`, `requirements.txt` |
-| `add a /users endpoint` | OpenCode adds endpoint to existing `main.py` |
-| `run uvicorn and test it` | OpenCode starts server, sends curl requests |
-| `/new_project` | Clears history, starts fresh project |
-
-## Project Structure
-
-```
-vibe_repos/
-└── user-<phone_number>/          # Your project directory
-    ├── main.py                   # Code files
-    ├── requirements.txt
-    └── calculator.py
-```
-
-**Files are visible on your host machine** at `./vibe_repos/`
-
-## Session Continuity
-
-OpenCode sessions are managed via the SDK:
-
-1. **First message** → Creates a new OpenCode session for the user
-2. **Follow-up messages** → Reuses the same session, maintaining full conversation history
-3. **Working directory** reused → Code files persist across runs
-4. **`/new_project`** → Creates a fresh session and working directory
+| `create a fastapi app` | OpenCode creates project files |
+| `add a /users endpoint` | OpenCode modifies existing code |
+| `fix the bug in main.py` | OpenCode reads, diagnoses, and patches |
+| `/new_project` | Clears history, starts a fresh project |
 
 ## Architecture
 
@@ -80,106 +75,189 @@ OpenCode sessions are managed via the SDK:
                  │                                  │        │
                  │  ┌──────────┐                    │        │
                  │  │ OpenCode │<───────────────────┘        │
-                 │  │  Server  │  (SDK calls via HTTP)       │
+                 │  │  Server  │  (REST API calls)           │
                  │  └──────────┘                             │
                  └───────────────────────────────────────────┘
 ```
 
-The bridge receives WhatsApp messages via a persistent connection and forwards them to the API over HTTP. Celery workers call OpenCode via the Python SDK to execute coding tasks asynchronously.
+The WhatsApp bridge maintains a persistent connection to WhatsApp and forwards messages to the FastAPI backend over HTTP. The API enqueues jobs in Celery, which calls OpenCode's REST API to execute coding tasks asynchronously. Redis stores job state and session mappings.
 
-## Testing
+## Project Structure
 
-```bash
-# Check API health
-curl http://localhost:8000/health
-
-# List all jobs
-curl http://localhost:8000/tasks \
-  -H "Authorization: Bearer <API_KEY>"
-
-# Check specific job
-curl http://localhost:8000/tasks/<job_id> \
-  -H "Authorization: Bearer <API_KEY>"
+```
+VibeBunny/
+├── docker-compose.yml              # Orchestrates all services
+├── Dockerfile                      # API + worker image
+├── pyproject.toml                  # Python dependencies
+├── opencode.json                   # OpenCode configuration
+│
+├── src/api/                        # Python/FastAPI backend
+│   ├── main.py                     # App entry point, middleware
+│   ├── exceptions.py               # Custom exception hierarchy
+│   ├── config/
+│   │   ├── settings.py             # Pydantic settings from env
+│   │   ├── redis.py                # Redis client factory
+│   │   └── celery.py               # Celery app configuration
+│   ├── models/
+│   │   └── job.py                  # Pydantic request/response schemas
+│   ├── routes/
+│   │   ├── webhook.py              # POST /webhook — receives WhatsApp messages
+│   │   ├── tasks.py                # CRUD for coding tasks
+│   │   └── health.py               # Health, readiness, liveness checks
+│   ├── services/
+│   │   ├── pipeline.py             # Message routing and job orchestration
+│   │   ├── opencode_wrapper.py     # OpenCode REST API client
+│   │   ├── job_service.py          # Redis-backed job persistence
+│   │   ├── notifier.py             # Notification interface
+│   │   ├── whatsapp_notifier.py    # WhatsApp message delivery
+│   │   ├── file_delivery.py        # Safe file extraction and sending
+│   │   ├── file_detector.py        # Detect changed files in working dir
+│   │   ├── code_extractor.py       # Extract code blocks from responses
+│   │   ├── question_extractor.py   # Detect agent questions for user
+│   │   └── circuit_breaker.py      # Circuit breaker for external calls
+│   └── tasks/
+│       └── jobs.py                 # Celery task definitions
+│
+├── src/whatsapp/                   # Node.js/TypeScript WhatsApp bridge
+│   ├── index.ts                    # Entry point, HTTP server
+│   ├── connection.ts               # Baileys socket, QR pairing, credentials
+│   ├── message.ts                  # Parse incoming messages
+│   ├── media.ts                    # Media download/upload
+│   ├── handler.ts                  # Forward messages to API
+│   └── Dockerfile
+│
+└── tests/                          # Pytest test suite
+    ├── conftest.py                 # Shared fixtures (fakeredis, settings)
+    ├── test_job_service.py
+    ├── test_pipeline.py
+    ├── test_circuit_breaker.py
+    ├── test_code_extractor.py
+    ├── test_question_extractor.py
+    ├── test_file_detector.py
+    ├── test_webhook.py
+    └── test_settings.py
 ```
 
-## Commands
+## Configuration
 
-- **Any text** → OpenCode will create/modify code based on your request
-- **`/new_project`** → Start fresh (clears conversation history)
+All configuration is done through environment variables. See [`.env.example`](.env.example) for the full list.
 
-## Key Features
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `API_KEY` | Yes | API key for authenticating requests to the task endpoints |
+| `WEBHOOK_SECRET` | Yes | Shared secret for WhatsApp bridge → API authentication |
+| `OPENCODE_PROVIDER_ID` | Yes | LLM provider (`anthropic`, `openai`, `openrouter`, etc.) |
+| `OPENCODE_MODEL_ID` | Yes | Model to use (e.g. `claude-sonnet-4-20250514`) |
+| Provider API key | Yes | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc. depending on provider |
+| `GITHUB_BOT_TOKEN` | No | For push/PR creation via a bot account |
 
-✅ **Persistent Projects** - One WhatsApp number = one project
-✅ **Host Access** - Files saved to `./vibe_repos/` on your machine
-✅ **Session Continuity** - OpenCode sees full conversation history
-✅ **Configurable LLM** - Use any provider/model supported by OpenCode
-✅ **Git Integration** - Each working dir is a git repo
+## API Endpoints
+
+All `/tasks` endpoints require authentication via `Authorization: Bearer <API_KEY>` or `X-API-Key` header.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Full health check (API + Redis + Celery) |
+| `GET` | `/health/ready` | Readiness probe |
+| `GET` | `/health/live` | Liveness probe |
+| `POST` | `/webhook` | Receive messages from WhatsApp bridge |
+| `POST` | `/tasks` | Create a new coding task |
+| `GET` | `/tasks` | List all tasks (paginated) |
+| `GET` | `/tasks/{job_id}` | Get task status and details |
+| `POST` | `/tasks/{job_id}/continue` | Send user response to a waiting task |
+| `GET` | `/tasks/session/{session_id}` | Get all tasks in a session |
+
+When running in debug mode (`DEBUG=true`), interactive API docs are available at `/docs`.
+
+## Development
+
+### Running Tests
+
+```bash
+# Install dev dependencies
+uv sync --group dev
+
+# Run tests
+uv run pytest
+
+# Run with coverage
+uv run pytest --cov=src
+```
+
+### Local Development (without Docker)
+
+```bash
+# Install dependencies
+uv sync
+
+# Start Redis
+docker run -d -p 6379:6379 redis:7-alpine
+
+# Start the API
+uv run uvicorn src.api.main:app --reload --port 8000
+
+# Start a Celery worker
+uv run celery -A src.api.config.celery worker --loglevel=info
+
+# Start the WhatsApp bridge (in src/whatsapp/)
+cd src/whatsapp && npm install && npm start
+```
+
+## Security
+
+- API and WhatsApp bridge only bind to `127.0.0.1` — not exposed to the internet by default
+- API container runs as non-root user with `no-new-privileges` and a read-only filesystem
+- Webhook requests authenticated via HMAC-SHA1 (`X-Webhook-Secret`)
+- Task endpoints authenticated via API key with constant-time comparison
+- Rate limiting (sliding window, configurable) on all endpoints
+- Path traversal protection on file delivery
+- See [SECURITY.md](SECURITY.md) for vulnerability disclosure policy
 
 ## Logs
 
 ```bash
 docker compose logs -f              # All services
-docker compose logs -f whatsapp   # WhatsApp bridge only
-docker compose logs -f worker     # Celery worker only
-docker compose logs -f api        # API only
-docker compose logs -f opencode   # OpenCode server only
+docker compose logs -f whatsapp     # WhatsApp bridge only
+docker compose logs -f worker       # Celery worker only
+docker compose logs -f api          # API only
+docker compose logs -f opencode     # OpenCode server only
 ```
 
 ## Troubleshooting
 
-**Permission denied on vibe_repos files:**
-```bash
-# Files created as root in container
-sudo chown -R $USER:$USER ./vibe_repos/
-```
-
 **WhatsApp not connecting:**
 ```bash
-# Force re-pairing
+# Force re-pairing by clearing auth data
 docker compose down -v
 docker compose up --build
 ```
 
-**Restart with fresh state:**
+**Permission denied on vibe_repos files:**
 ```bash
-docker compose down -v
-docker compose up --build
+# Container runs as UID 1000 — match ownership on host
+sudo chown -R 1000:1000 ./vibe_repos/
 ```
 
-## Implementation Notes
-
-- Connects to `opencode serve` via REST API for interactive coding sessions
-- OpenCode sessions handle conversation history automatically
-- Permission requests from the agent can be relayed to the user via WhatsApp
-- Working directory determined by sender ID: `vibe_repos/user-<sender>/`
-- Celery handles async job processing
-- Redis for job queue, state persistence, and OpenCode session ID mapping
-
-## Project Structure
-
+**Celery worker not processing jobs:**
+```bash
+# Check worker is running and connected to Redis
+docker compose logs worker
+# Verify Redis is healthy
+docker compose exec redis redis-cli ping
 ```
-docker-compose.yml          — orchestrates all services
 
-src/whatsapp/               — WhatsApp bridge (Node/TypeScript)
-  index.ts                  — entry point, wires socket + message loop
-  connection.ts             — Baileys socket, QR display, credential persistence
-  message.ts                — parses incoming messages into structured format
-  media.ts                  — download/send media (audio, images, text)
-  handler.ts                — forwards messages to the API, parses replies
-  Dockerfile
-
-src/api/                    — API service (Python/FastAPI)
-  main.py                   — FastAPI app, mounts routes
-  models.py                 — request/response schemas (Pydantic)
-  routes/
-    webhook.py              — POST /webhook — receives messages, returns replies
-    health.py               — GET /health
-  services/
-    pipeline.py             — orchestrates message routing to OpenCode jobs
-    opencode_wrapper.py     — OpenCode REST API client
-    elevenlabs/
-      client.py             — shared ElevenLabs API client
-      stt.py                — speech-to-text (voice → text)
-      tts.py                — text-to-speech (placeholder)
-  Dockerfile
+**OpenCode not responding:**
+```bash
+# Check OpenCode health
+curl http://localhost:4096/global/health
+# Check logs for configuration issues
+docker compose logs opencode
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+
+## License
+
+[MIT](LICENSE)

@@ -4,7 +4,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "npx tsx index.ts"
+    "start": "npx tsx index.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.16",

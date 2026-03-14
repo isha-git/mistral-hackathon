@@ -1,9 +1,16 @@
 [project]
-name = "mistral-hackathon"
+name = "vibebunny"
 version = "0.1.0"
-description = "Add your description here"
+description = "Chat-based coding agent — control a persistent coding project through WhatsApp"
 readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.12"
+keywords = ["whatsapp", "coding-agent", "opencode", "ai", "automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+]
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.34.0",
@@ -20,4 +27,5 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "fakeredis>=2.21.0",
 ]

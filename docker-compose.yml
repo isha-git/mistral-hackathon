@@ -10,6 +10,10 @@ services:
     restart: unless-stopped
     volumes:
       - redis_data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -21,16 +25,23 @@ services:
   opencode:
     image: ghcr.io/felixclements/opencode-server-docker:latest
     restart: unless-stopped
-    entrypoint: ["opencode"]
-    command: ["serve", "--port", "4096", "--hostname", "0.0.0.0"]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        printf '{"model":"%s/%s","provider":{"%s":{"models":{"%s":{}}}}}\n' \
+          "$$OPENCODE_PROVIDER_ID" "$$OPENCODE_MODEL_ID" \
+          "$$OPENCODE_PROVIDER_ID" "$$OPENCODE_MODEL_ID" \
+          > /workspace/opencode.json
+        exec opencode serve --port 4096 --hostname 0.0.0.0
     environment:
       - OPENCODE_SERVER_PASSWORD=${OPENCODE_SERVER_PASSWORD:-}
       - OPENCODE_CONFIG=/workspace/opencode.json
+      - OPENCODE_PROVIDER_ID=${OPENCODE_PROVIDER_ID:-anthropic}
+      - OPENCODE_MODEL_ID=${OPENCODE_MODEL_ID:-claude-sonnet-4-20250514}
     env_file:
       - .env
     volumes:
       - ./vibe_repos:/workspace
-      - ./opencode.json:/workspace/opencode.json:ro
       - opencode_data:/data
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:4096/global/health"]
@@ -51,6 +62,11 @@ services:
     environment:
       - API_URL=http://api:8000
       - SEND_PORT=3456
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+    deploy:
+      resources:
+        limits:
+          memory: 256M
     volumes:
       - whatsapp-auth:/app/.auth
     depends_on:
@@ -64,7 +80,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8001:8000"
     environment:
       - REDIS_URL=redis://redis:6379/0
       - HOST=0.0.0.0
@@ -94,6 +110,10 @@ services:
     read_only: true
     tmpfs:
       - /tmp:noexec,nosuid,size=100m
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
   worker:
     build:
@@ -120,6 +140,10 @@ services:
       - app-network
     security_opt:
       - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 1G
     healthcheck:
       disable: true
 

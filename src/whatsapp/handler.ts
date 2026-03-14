@@ -1,6 +1,7 @@
 import type { IncomingMessage } from "./message.js";
 
 const API_URL = process.env.API_URL ?? "http://api:8000";
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET ?? "";
 
 export type Reply =
   | { type: "text"; text: string }
@@ -62,7 +63,10 @@ function parseApiReply(data: ApiReply): Reply {
 export async function handleMessage(msg: IncomingMessage): Promise<Reply> {
   const res = await fetch(`${API_URL}/webhook`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(WEBHOOK_SECRET && { "X-Webhook-Secret": WEBHOOK_SECRET }),
+    },
     body: buildRequestBody(msg),
     signal: AbortSignal.timeout(30_000),
   });

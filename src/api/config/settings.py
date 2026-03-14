@@ -39,10 +39,43 @@ class Settings(BaseSettings):
     # WhatsApp callback - where to send agent questions/completions back to the user
     whatsapp_callback_url: str | None = None
 
+    # Shared secret for authenticating webhook requests from the WhatsApp bridge
+    webhook_secret: str | None = None
+
+    # Working directory
+    vibe_repos_base: str = "/app/vibe_repos"
+
+    # Job defaults
+    default_max_turns: int = 50
+
+    # Rate limiting
+    rate_limit_per_minute: int = 30
+
+    # File handling
+    max_file_size_bytes: int = 5_242_880  # 5MB
+    min_code_block_length: int = 10
+
+    # Webhook timeouts
+    webhook_send_timeout: float = 10.0
+    webhook_document_timeout: float = 30.0
+
+    # Notification message limits
+    notification_result_max_chars: int = 500
+    notification_error_max_chars: int = 200
+    conversation_message_max_chars: int = 1000
+
+    # Session TTLs
+    opencode_session_ttl: int = 86400  # 1 day
+    repo_workdir_ttl: int = 2592000  # 30 days
+
+    # CORS
+    cors_origins: list[str] = []
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
+        extra = "ignore"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

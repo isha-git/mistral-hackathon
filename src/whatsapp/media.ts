@@ -70,3 +70,20 @@ export async function sendImage(
     caption,
   });
 }
+
+/** Send a file as a document attachment. */
+export async function sendDocument(
+  sock: WASocket,
+  jid: string,
+  buffer: Buffer,
+  filename: string,
+  mimetype: string = "application/octet-stream",
+  caption?: string,
+): Promise<void> {
+  await sock.sendMessage(jid, {
+    document: buffer,
+    mimetype,
+    fileName: filename,
+    caption,
+  });
+}

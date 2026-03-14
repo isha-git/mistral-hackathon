@@ -5,14 +5,16 @@ const API_URL = process.env.API_URL ?? "http://api:8000";
 export type Reply =
   | { type: "text"; text: string }
   | { type: "audio"; buffer: Buffer; mimetype: string }
-  | { type: "image"; buffer: Buffer; mimetype: string; caption?: string };
+  | { type: "image"; buffer: Buffer; mimetype: string; caption?: string }
+  | { type: "document"; buffer: Buffer; mimetype: string; filename: string; caption?: string };
 
 type ApiReply = {
-  type: "text" | "audio" | "image";
+  type: "text" | "audio" | "image" | "document";
   text?: string;
   data_base64?: string;
   mimetype?: string;
   caption?: string;
+  filename?: string;
 };
 
 function buildRequestBody(msg: IncomingMessage): string {
@@ -40,6 +42,16 @@ function parseApiReply(data: ApiReply): Reply {
       type: "image",
       buffer: Buffer.from(data.data_base64, "base64"),
       mimetype: data.mimetype ?? "image/jpeg",
+      caption: data.caption,
+    };
+  }
+
+  if (data.type === "document" && data.data_base64) {
+    return {
+      type: "document",
+      buffer: Buffer.from(data.data_base64, "base64"),
+      mimetype: data.mimetype ?? "application/octet-stream",
+      filename: data.filename ?? "file",
       caption: data.caption,
     };
   }

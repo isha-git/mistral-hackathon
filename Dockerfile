@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy dependency files first
 COPY pyproject.toml ./
 
-# Install Python dependencies as root (needed for compilation)
+# Install Python dependencies
 RUN pip install --no-cache-dir uv
 RUN pip install --no-cache-dir -e .
 
@@ -20,13 +20,10 @@ RUN pip install --no-cache-dir -e .
 COPY src/ ./src/
 
 # Create directories for persistence
-RUN mkdir -p /app/vibe_repos /app/.vibe
+RUN mkdir -p /app/vibe_repos
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-
-# Set environment variables
-ENV VIBE_HOME=/app/.vibe
 
 # Expose port
 EXPOSE 8000

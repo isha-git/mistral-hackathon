@@ -8,7 +8,6 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    # NO PORTS EXPOSED - internal only
     volumes:
       - redis_data:/data
     healthcheck:
@@ -19,16 +18,39 @@ services:
     networks:
       - app-network
 
+  opencode:
+    image: ghcr.io/felixclements/opencode-server-docker:latest
+    restart: unless-stopped
+    entrypoint: ["opencode"]
+    command: ["serve", "--port", "4096", "--hostname", "0.0.0.0"]
+    environment:
+      - OPENCODE_SERVER_PASSWORD=${OPENCODE_SERVER_PASSWORD:-}
+      - OPENCODE_CONFIG=/workspace/opencode.json
+    env_file:
+      - .env
+    volumes:
+      - ./vibe_repos:/workspace
+      - ./opencode.json:/workspace/opencode.json:ro
+      - opencode_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4096/global/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - app-network
+
   whatsapp:
     build:
       context: ./src/whatsapp
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3001:3001"
+      - "127.0.0.1:3456:3456"
     environment:
       - API_URL=http://api:8000
-      - SEND_PORT=3001
+      - SEND_PORT=3456
     volumes:
       - whatsapp-auth:/app/.auth
     depends_on:
@@ -41,24 +63,22 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    # ONLY bind to localhost - not accessible from internet
     ports:
       - "127.0.0.1:8000:8000"
     environment:
       - REDIS_URL=redis://redis:6379/0
       - HOST=0.0.0.0
       - PORT=8000
-      - WHATSAPP_CALLBACK_URL=http://whatsapp:3001/send
-      - VIBE_HOME=/app/.vibe
+      - WHATSAPP_CALLBACK_URL=http://whatsapp:3456/send
+      - OPENCODE_URL=http://opencode:4096
     env_file:
       - .env
     volumes:
-      # Persist Vibe sessions (conversation history)
-      - vibe_sessions:/app/.vibe
-      # Bind mount working directories for host access
       - ./vibe_repos:/app/vibe_repos
     depends_on:
       redis:
+        condition: service_healthy
+      opencode:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health/live')"]
@@ -68,7 +88,7 @@ services:
       start_period: 10s
     networks:
       - app-network
-    # Security: Run as non-root
+    user: "1000:1000"
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -85,36 +105,30 @@ services:
     stdin_open: true
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - VIBE_HOME=/app/.vibe
-      - MISTRAL_API_KEY=${MISTRAL_VIBE_API_KEY}
+      - OPENCODE_URL=http://opencode:4096
     env_file:
       - .env
     volumes:
-      # Same volumes as API - worker needs access to sessions and repos
-      - vibe_sessions:/app/.vibe
-      # Bind mount working directories for host access
       - ./vibe_repos:/app/vibe_repos
     depends_on:
       redis:
         condition: service_healthy
-      api:
+      opencode:
         condition: service_healthy
+    user: "1000:1000"
     networks:
       - app-network
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      disable: true
 
 volumes:
   redis_data:
   whatsapp-auth:
-  vibe_sessions:
-    # Vibe CLI session data (conversation history, config)
-
-# Bind mounts for host-accessible directories
-# vibe_repos is mapped to ./vibe_repos on host
+  opencode_data:
 
 networks:
   app-network:
     driver: bridge
-    # Internal network only
     internal: false

@@ -25,7 +25,7 @@ class ConversationMessage(BaseModel):
 
 
 class TurnResult(BaseModel):
-    """Result from a single turn with vibe."""
+    """Result from a single turn with the coding agent."""
 
     turn_number: int
     prompt: str
@@ -40,7 +40,9 @@ class Job(BaseModel):
 
     id: UUID = Field(default_factory=uuid4)
     session_id: str | None = Field(None, description="Session ID to link related jobs")
-    prompt: str = Field(..., min_length=1, description="The coding task prompt")
+    prompt: str = Field(
+        ..., min_length=1, max_length=10000, description="The coding task prompt"
+    )
     status: JobStatus = Field(default=JobStatus.PENDING)
 
     # Repository information
@@ -67,7 +69,11 @@ class Job(BaseModel):
     error_message: str | None = None
 
     # External references
-    webhook_url: str | None = Field(None, description="URL to notify on status changes")
+    webhook_url: str | None = Field(
+        None,
+        description="URL to notify on status changes",
+        pattern=r"^https?://.+",
+    )
 
     class Config:
         json_encoders = {
@@ -79,7 +85,9 @@ class Job(BaseModel):
 class JobCreate(BaseModel):
     """Model for creating a new job."""
 
-    prompt: str = Field(..., min_length=1, description="The coding task prompt")
+    prompt: str = Field(
+        ..., min_length=1, max_length=10000, description="The coding task prompt"
+    )
     session_id: str | None = Field(
         None, description="Session ID to link with previous jobs"
     )
@@ -93,7 +101,11 @@ class JobCreate(BaseModel):
     branch_name: str | None = Field(
         None, description="Branch name to create (auto-generated if not provided)"
     )
-    webhook_url: str | None = Field(None, description="URL to notify on status changes")
+    webhook_url: str | None = Field(
+        None,
+        description="URL to notify on status changes",
+        pattern=r"^https?://.+",
+    )
     max_turns: int = Field(default=50, description="Maximum turns for this session")
 
 

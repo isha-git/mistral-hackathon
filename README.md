@@ -1,15 +1,15 @@
-# WhatsApp + Mistral Vibe Coding Agent
+# WhatsApp + OpenCode Coding Agent
 
-VibeBunny lets you manage Mistral Vibe through the cloud, given it's own github account it can make PRs, leave comments on PRs and contribute to your codebases.
-The idea is that this can run on a homelab (or cloud) to help you code. Long running agents that can help you maintain, contribute or review the repos you add it to. You control it through whatsapp, voice or text whichever you prefer. It uses ElevenLabs for speech-to-text, Mistral API for LLMs and Mistral Vibe for coding agents harness.
+A WhatsApp bridge that lets you chat with OpenCode to write code. All projects persist on your local filesystem.
+The idea is that this can run on a homelab at home to help you code. Long running agents that can help you maintain, contribute or review the repos you add it to. You control it through whatsapp, voice or text whichever you prefer. It uses ElevenLabs for speech-to-text and OpenCode for coding agents.
 
 ## How It Works
 
 **One WhatsApp number = One persistent coding project**
 
-- Send any message → Vibe creates/modifies code in your project
-- Files saved to `./vibe_repos/`
-- Session history tracked automatically via vibe's sessions
+- Send any message → OpenCode creates/modifies code in your project
+- Files saved to `./vibe_repos/` (visible on your host machine)
+- Session history tracked automatically via OpenCode sessions
 - Type `/new_project` to start fresh
 
 ## Quick Start
@@ -17,12 +17,12 @@ The idea is that this can run on a homelab (or cloud) to help you code. Long run
 ```bash
 # 1. Set up environment
 cp .env.example .env
-# Edit .env and add your MISTRAL_VIBE_API_KEY
+# Edit .env and add your OPENCODE_PROVIDER_ID, OPENCODE_MODEL_ID, and provider API keys
 
 # 2. Start everything
 docker compose up --build
 
-# 3. Scan QR code with whatsapp phone number you'd like to use
+# 3. Scan QR code with bot's phone
 # WhatsApp > Settings > Linked Devices > Link a Device
 ```
 
@@ -32,9 +32,9 @@ Send messages from **your personal WhatsApp** to the bot's number:
 
 | Message | What Happens |
 |---------|--------------|
-| `create a fastapi app` | Vibe creates `main.py`, `requirements.txt` |
-| `add a /users endpoint` | Vibe adds endpoint to existing `main.py` |
-| `run uvicorn and test it` | Vibe starts server, sends curl requests |
+| `create a fastapi app` | OpenCode creates `main.py`, `requirements.txt` |
+| `add a /users endpoint` | OpenCode adds endpoint to existing `main.py` |
+| `run uvicorn and test it` | OpenCode starts server, sends curl requests |
 | `/new_project` | Clears history, starts fresh project |
 
 ## Project Structure
@@ -44,23 +44,19 @@ vibe_repos/
 └── user-<phone_number>/          # Your project directory
     ├── main.py                   # Code files
     ├── requirements.txt
-    ├── calculator.py
-    └── sessions/                 # Vibe conversation history
-        └── session_20260228.../  # Each run gets session dir
-            ├── messages.jsonl    # Full conversation
-            └── meta.json         # Session metadata
+    └── calculator.py
 ```
 
-**For local inspection you can check what the agent produces** at `./vibe_repos/`
+**Files are visible on your host machine** at `./vibe_repos/`
 
 ## Session Continuity
 
-We follow vibe's session design:
+OpenCode sessions are managed via the SDK:
 
-1. **First message** → Creates `sessions/session_<timestamp>/`
-2. **Follow-up messages** → Load previous session messages, continue conversation
-3. **New session dir** created for each run (vibe's telemetry)
-4. **Working directory** reused → Code files persist across runs
+1. **First message** → Creates a new OpenCode session for the user
+2. **Follow-up messages** → Reuses the same session, maintaining full conversation history
+3. **Working directory** reused → Code files persist across runs
+4. **`/new_project`** → Creates a fresh session and working directory
 
 ## Architecture
 
@@ -82,24 +78,14 @@ We follow vibe's session design:
                  │  │  (state) │               │  Worker   │  │
                  │  └──────────┘               └────┬─────┘  │
                  │                                  │        │
-                 └──────────────────────────────────┼────────┘
-                                                    │
-                                          runs: vibe (package, not cli)
-                                                    │
-                                                    ▼
-                                             ┌─────────────┐
-                                             │ Mistral Vibe │
-                                             │   CLI        │
-                                             │              │
-                                             │ • clones repo│
-                                             │ • writes code│
-                                             │ • commits    │
-                                             │ • pushes     │
-                                             │ • creates PR │
-                                             └─────────────┘
+                 │  ┌──────────┐                    │        │
+                 │  │ OpenCode │<───────────────────┘        │
+                 │  │  Server  │  (SDK calls via HTTP)       │
+                 │  └──────────┘                             │
+                 └───────────────────────────────────────────┘
 ```
 
-The bridge receives WhatsApp messages via a persistent connection and forwards them to the API over HTTP. Celery workers run Mistral Vibe to execute coding tasks asynchronously.
+The bridge receives WhatsApp messages via a persistent connection and forwards them to the API over HTTP. Celery workers call OpenCode via the Python SDK to execute coding tasks asynchronously.
 
 ## Testing
 
@@ -118,22 +104,25 @@ curl http://localhost:8000/tasks/<job_id> \
 
 ## Commands
 
-- **Any text** → Vibe will create/modify code based on your request
+- **Any text** → OpenCode will create/modify code based on your request
 - **`/new_project`** → Start fresh (clears conversation history)
 
 ## Key Features
 
-✅ **Persistent Projects** - One WhatsApp number = one project  
-✅ **Session Continuity** - Vibe sees full conversation history  
-✅ **Git Integration** - Each working dir is a git repo  
+✅ **Persistent Projects** - One WhatsApp number = one project
+✅ **Host Access** - Files saved to `./vibe_repos/` on your machine
+✅ **Session Continuity** - OpenCode sees full conversation history
+✅ **Configurable LLM** - Use any provider/model supported by OpenCode
+✅ **Git Integration** - Each working dir is a git repo
 
 ## Logs
 
 ```bash
 docker compose logs -f              # All services
 docker compose logs -f whatsapp   # WhatsApp bridge only
-docker compose logs -f worker     # Vibe worker only
+docker compose logs -f worker     # Celery worker only
 docker compose logs -f api        # API only
+docker compose logs -f opencode   # OpenCode server only
 ```
 
 ## Troubleshooting
@@ -159,11 +148,12 @@ docker compose up --build
 
 ## Implementation Notes
 
-- Uses `vibe.core.programmatic.run_programmatic()` for non-interactive execution
-- Loads previous messages from `sessions/session_*/messages.jsonl`, sticking to vibe its implementation
+- Connects to `opencode serve` via REST API for interactive coding sessions
+- OpenCode sessions handle conversation history automatically
+- Permission requests from the agent can be relayed to the user via WhatsApp
 - Working directory determined by sender ID: `vibe_repos/user-<sender>/`
 - Celery handles async job processing
-- Redis for job queue and state persistence
+- Redis for job queue, state persistence, and OpenCode session ID mapping
 
 ## Project Structure
 
@@ -185,11 +175,11 @@ src/api/                    — API service (Python/FastAPI)
     webhook.py              — POST /webhook — receives messages, returns replies
     health.py               — GET /health
   services/
-    pipeline.py             — orchestrates: STT → Mistral (later) → TTS (later)
+    pipeline.py             — orchestrates message routing to OpenCode jobs
+    opencode_wrapper.py     — OpenCode REST API client
     elevenlabs/
       client.py             — shared ElevenLabs API client
       stt.py                — speech-to-text (voice → text)
       tts.py                — text-to-speech (placeholder)
   Dockerfile
 ```
-

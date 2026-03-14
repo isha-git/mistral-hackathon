@@ -7,7 +7,7 @@ class Settings(BaseSettings):
 
     # API Configuration
     api_key: str
-    app_name: str = "Mistral Vibe API"
+    app_name: str = "OpenCode API"
     app_version: str = "0.1.0"
     debug: bool = False
 
@@ -23,10 +23,13 @@ class Settings(BaseSettings):
     celery_broker_url: str | None = None
     celery_result_backend: str | None = None
 
-    # Mistral Vibe CLI Configuration
-    mistral_vibe_api_key: str
-    mistral_vibe_base_url: str = "http://localhost:8080"  # Default, update as needed
-    mistral_vibe_timeout: int = 1800  # 30 minutes in seconds
+    # OpenCode Configuration
+    opencode_url: str = "http://opencode:4096"
+    opencode_provider_id: str = "anthropic"
+    opencode_model_id: str = "claude-sonnet-4-20250514"
+    opencode_timeout: int = 1800  # 30 minutes in seconds
+    opencode_server_password: str | None = None
+    opencode_server_username: str = "opencode"
 
     # Job Configuration
     job_max_timeout: int = 1800  # 30 minutes in seconds

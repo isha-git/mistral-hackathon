@@ -1,4 +1,4 @@
-from api.models import IncomingMessage, Reply
+from src.api.models.job import IncomingMessage, Reply
 
 
 async def process_message(msg: IncomingMessage) -> Reply:

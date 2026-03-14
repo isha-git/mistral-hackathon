@@ -277,6 +277,16 @@ class JobService:
 
         return paginated_jobs, total
 
+    def get_opencode_session(self, session_id: str | None) -> str | None:
+        """Retrieve stored OpenCode session ID from Redis for session continuity."""
+        if not session_id:
+            return None
+        return self.redis.get(f"opencode_session:{session_id}")
+
+    def store_opencode_session(self, session_id: str, opencode_session_id: str) -> None:
+        """Store OpenCode session ID in Redis."""
+        self.redis.setex(f"opencode_session:{session_id}", 86400, opencode_session_id)
+
     def delete_job(self, job_id: UUID | str) -> bool:
         """Delete a job from Redis."""
         job_key = self._get_job_key(job_id)

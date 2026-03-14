@@ -19,7 +19,7 @@ settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="API for running Mistral Vibe CLI coding agents with webhook support",
+    description="API for running OpenCode coding agents with webhook support",
     docs_url="/docs" if settings.debug else None,
     redoc_url="/redoc" if settings.debug else None,
 )

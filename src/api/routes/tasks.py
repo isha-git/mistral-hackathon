@@ -1,3 +1,5 @@
+import hmac
+
 from fastapi import APIRouter, Depends, HTTPException, Header, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Annotated
@@ -5,6 +7,7 @@ from uuid import UUID
 
 from src.api.config.settings import get_settings
 from src.api.models.job import (
+    Job,
     JobCreate,
     JobResponse,
     JobListResponse,
@@ -12,10 +15,32 @@ from src.api.models.job import (
     JobStatus,
 )
 from src.api.services.job_service import get_job_service, JobService
-from src.api.tasks.jobs import run_vibe_task, continue_vibe_task
+from src.api.tasks.jobs import run_coding_task, continue_coding_task
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 security = HTTPBearer(auto_error=False)
+
+
+def job_to_response(job: Job) -> JobResponse:
+    """Convert a Job model to a JobResponse."""
+    return JobResponse(
+        id=job.id,
+        session_id=job.session_id,
+        status=job.status,
+        repo_url=job.repo_url,
+        branch_name=job.branch_name,
+        working_dir=job.working_dir,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        current_turn=job.current_turn,
+        max_turns=job.max_turns,
+        result=job.result,
+        error_message=job.error_message,
+        current_question=job.current_question,
+        conversation=job.conversation,
+        turn_history=job.turn_history,
+    )
 
 
 async def verify_api_key(
@@ -38,7 +63,7 @@ async def verify_api_key(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if api_key != settings.api_key:
+    if not hmac.compare_digest(api_key, settings.api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
@@ -60,7 +85,7 @@ async def create_task(
     api_key: Annotated[str, Depends(verify_api_key)],
 ):
     """
-    Submit a new coding task to be processed by Mistral Vibe.
+    Submit a new coding task to be processed by OpenCode.
 
     For stateful sessions:
     - Pass session_id to link related jobs
@@ -89,19 +114,9 @@ async def create_task(
     )
 
     # Queue Celery task
-    run_vibe_task.delay(str(job.id))
+    run_coding_task.delay(str(job.id))
 
-    return JobResponse(
-        id=job.id,
-        session_id=job.session_id,
-        status=job.status,
-        repo_url=job.repo_url,
-        branch_name=job.branch_name,
-        working_dir=job.working_dir,
-        created_at=job.created_at,
-        current_turn=job.current_turn,
-        max_turns=job.max_turns,
-    )
+    return job_to_response(job)
 
 
 @router.get(
@@ -119,27 +134,7 @@ async def list_tasks(
     jobs, total = job_service.list_jobs(page=page, page_size=page_size)
 
     return JobListResponse(
-        jobs=[
-            JobResponse(
-                id=job.id,
-                session_id=job.session_id,
-                status=job.status,
-                repo_url=job.repo_url,
-                branch_name=job.branch_name,
-                working_dir=job.working_dir,
-                created_at=job.created_at,
-                started_at=job.started_at,
-                completed_at=job.completed_at,
-                current_turn=job.current_turn,
-                max_turns=job.max_turns,
-                result=job.result,
-                error_message=job.error_message,
-                current_question=job.current_question,
-                conversation=job.conversation,
-                turn_history=job.turn_history,
-            )
-            for job in jobs
-        ],
+        jobs=[job_to_response(job) for job in jobs],
         total=total,
         page=page,
         page_size=page_size,
@@ -165,24 +160,7 @@ async def get_task(
             detail=f"Job {job_id} not found",
         )
 
-    return JobResponse(
-        id=job.id,
-        session_id=job.session_id,
-        status=job.status,
-        repo_url=job.repo_url,
-        branch_name=job.branch_name,
-        working_dir=job.working_dir,
-        created_at=job.created_at,
-        started_at=job.started_at,
-        completed_at=job.completed_at,
-        current_turn=job.current_turn,
-        max_turns=job.max_turns,
-        result=job.result,
-        error_message=job.error_message,
-        current_question=job.current_question,
-        conversation=job.conversation,
-        turn_history=job.turn_history,
-    )
+    return job_to_response(job)
 
 
 @router.post(
@@ -222,23 +200,11 @@ async def continue_task(
         )
 
     # Queue continuation task
-    continue_vibe_task.delay(str(job_id), user_response.response)
+    continue_coding_task.delay(str(job_id), user_response.response)
 
     # Return current state (will update async)
-    return JobResponse(
-        id=job.id,
-        session_id=job.session_id,
-        status=JobStatus.PROCESSING,
-        repo_url=job.repo_url,
-        branch_name=job.branch_name,
-        working_dir=job.working_dir,
-        created_at=job.created_at,
-        started_at=job.started_at,
-        current_turn=job.current_turn,
-        max_turns=job.max_turns,
-        conversation=job.conversation,
-        turn_history=job.turn_history,
-    )
+    job.status = JobStatus.PROCESSING
+    return job_to_response(job)
 
 
 @router.get(
@@ -254,24 +220,4 @@ async def get_session_jobs(
     """Get all jobs belonging to a session."""
     jobs = job_service.get_session_jobs(session_id)
 
-    return [
-        JobResponse(
-            id=job.id,
-            session_id=job.session_id,
-            status=job.status,
-            repo_url=job.repo_url,
-            branch_name=job.branch_name,
-            working_dir=job.working_dir,
-            created_at=job.created_at,
-            started_at=job.started_at,
-            completed_at=job.completed_at,
-            current_turn=job.current_turn,
-            max_turns=job.max_turns,
-            result=job.result,
-            error_message=job.error_message,
-            current_question=job.current_question,
-            conversation=job.conversation,
-            turn_history=job.turn_history,
-        )
-        for job in jobs
-    ]
+    return [job_to_response(job) for job in jobs]

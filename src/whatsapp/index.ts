@@ -2,7 +2,7 @@ import http from "node:http";
 import { createBotSocket, waitForConnection } from "./connection.js";
 import { parseMessage } from "./message.js";
 import { handleMessage, type Reply } from "./handler.js";
-import { sendText, sendAudio, sendImage } from "./media.js";
+import { sendText, sendAudio, sendImage, sendDocument } from "./media.js";
 import type { WASocket } from "@whiskeysockets/baileys";
 
 const SEND_PORT = parseInt(process.env.SEND_PORT ?? "3001");
@@ -17,6 +17,9 @@ async function sendReply(sock: WASocket, jid: string, reply: Reply): Promise<voi
       break;
     case "image":
       await sendImage(sock, jid, reply.buffer, reply.caption);
+      break;
+    case "document":
+      await sendDocument(sock, jid, reply.buffer, reply.filename, reply.mimetype, reply.caption);
       break;
   }
 }
@@ -33,26 +36,53 @@ async function sendReply(sock: WASocket, jid: string, reply: Reply): Promise<voi
  */
 function startSendServer(sock: WASocket): void {
   const server = http.createServer(async (req, res) => {
-    if (req.method !== "POST" || req.url !== "/send") {
+    if (req.method !== "POST" || (req.url !== "/send" && req.url !== "/send-document")) {
       res.writeHead(404);
       res.end();
       return;
     }
 
+    const route = req.url;
+    const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB
     let body = "";
-    req.on("data", (chunk) => (body += chunk));
+    let bodySize = 0;
+    req.on("data", (chunk: Buffer | string) => {
+      bodySize += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+      if (bodySize > MAX_BODY_SIZE) {
+        res.writeHead(413);
+        res.end(JSON.stringify({ error: "Request body too large" }));
+        req.destroy();
+        return;
+      }
+      body += chunk;
+    });
     req.on("end", async () => {
+      if (bodySize > MAX_BODY_SIZE) return;
       try {
-        const { to, message } = JSON.parse(body) as { to: string; message: string };
+        const parsed = JSON.parse(body);
 
-        if (!to || !message) {
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: "Missing 'to' or 'message'" }));
-          return;
+        if (route === "/send-document") {
+          const { to, data_base64, filename, mimetype, caption } = parsed as {
+            to: string; data_base64: string; filename: string; mimetype?: string; caption?: string;
+          };
+          if (!to || !data_base64 || !filename) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: "Missing 'to', 'data_base64', or 'filename'" }));
+            return;
+          }
+          const buffer = Buffer.from(data_base64, "base64");
+          await sendDocument(sock, to, buffer, filename, mimetype ?? "application/octet-stream", caption);
+          console.log(`[send-server] sent document '${filename}' to ${to}`);
+        } else {
+          const { to, message } = parsed as { to: string; message: string };
+          if (!to || !message) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: "Missing 'to' or 'message'" }));
+            return;
+          }
+          await sendText(sock, to, message);
+          console.log(`[send-server] sent message to ${to}`);
         }
-
-        await sendText(sock, to, message);
-        console.log(`[send-server] sent message to ${to}`);
 
         res.writeHead(200);
         res.end(JSON.stringify({ ok: true }));
